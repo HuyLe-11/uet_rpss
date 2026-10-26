@@ -1,7 +1,8 @@
 /**
  * Cloudflare Worker proxy and Durable Object queue for the OTT BO2 scorer.
  *
- * This remains separate from the current frontend and Supabase scoring flow.
+ * The browser calls this Worker directly. Supabase JWTs authenticate
+ * contestants; OnlineCompiler credentials remain Worker secrets.
  */
 
 const MAX_SOURCE_BYTES = 65536;
@@ -13,6 +14,32 @@ const UPSTREAM_CONCURRENCY = 2;
 const UPSTREAM_INTERVAL_MS = 4200;
 const MAX_RETRIES = 5;
 const ONLINECOMPILER_URL = "https://api.onlinecompiler.io/api/run-code-sync/";
+
+async function authenticate(request, env) {
+  const token = request.headers.get("authorization");
+  if (!token?.match(/^Bearer\s+\S+$/i) || !env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) return null;
+  const response = await fetch(`${env.SUPABASE_URL.replace(/\/$/, "")}/auth/v1/user`, {
+    headers: { apikey: env.SUPABASE_ANON_KEY, authorization: token },
+  });
+  if (!response.ok) return null;
+  const user = await response.json();
+  return user?.id ? { id: user.id, token } : null;
+}
+
+async function supabaseRpc(env, token, name, body) {
+  const response = await fetch(`${env.SUPABASE_URL.replace(/\/$/, "")}/rest/v1/rpc/${name}`, {
+    method: "POST",
+    headers: {
+      apikey: env.SUPABASE_ANON_KEY,
+      authorization: token,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(`supabase_${name}_${response.status}:${payload?.message || payload?.hint || "request failed"}`);
+  return payload;
+}
 
 function jsonResponse(value, status = 200) {
   return new Response(JSON.stringify(value), {
@@ -28,7 +55,7 @@ function corsHeaders() {
   return {
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,OPTIONS",
-    "access-control-allow-headers": "content-type",
+    "access-control-allow-headers": "authorization,content-type",
   };
 }
 
@@ -275,11 +302,21 @@ class ScoringQueue {
 
   async fetch(request) {
     const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/enqueue-waiting") {
+      return this.enqueueWaiting(await request.json());
+    }
     if (request.method === "POST" && url.pathname === "/enqueue") {
       return this.enqueue(await request.json());
     }
     if (request.method === "GET" && url.pathname.startsWith("/jobs/")) {
-      const job = await this.state.storage.get(`job:${url.pathname.slice(6)}`);
+      const jobId = url.pathname.slice(6);
+      let job = await this.state.storage.get(`job:${jobId}`);
+      if (job?.user_id && job.user_id !== request.headers.get("x-user-id")) {
+        return jsonResponse({ detail: "Job not found" }, 404);
+      }
+      if (job?.status === "waiting") {
+        job = await this.tryStartWaiting(job);
+      }
       return job ? jsonResponse(publicJob(job)) : jsonResponse({ detail: "Job not found" }, 404);
     }
     if (request.method === "GET" && url.pathname === "/admin/queue") {
@@ -335,6 +372,51 @@ class ScoringQueue {
     await this.state.storage.put("queue", queue);
     await this.state.storage.setAlarm(Date.now());
     return jsonResponse(publicJob({ ...job, position: queue.length }), 202);
+  }
+
+  async enqueueWaiting(body) {
+    const job = {
+      job_id: body.job_id || crypto.randomUUID(),
+      status: "waiting",
+      user_id: body.user_id,
+      match_id: body.match_id,
+      contestant_code: body.contestant_code || null,
+      sha256: body.sha256 || null,
+      auth_token: body.auth_token,
+      created_at: new Date().toISOString(),
+      attempts: 0,
+    };
+    await this.state.storage.put(`job:${job.job_id}`, job);
+    return jsonResponse(publicJob(job), 202);
+  }
+
+  async tryStartWaiting(job) {
+    if (Date.now() - Date.parse(job.created_at) > 60_000) {
+      job.status = "failed";
+      job.error_code = "opponent_timeout";
+      job.error = "Opponent did not submit within 60 seconds";
+      await this.state.storage.put(`job:${job.job_id}`, job);
+      return job;
+    }
+    try {
+      const match = await supabaseRpc(this.env, job.auth_token, "proxy_prepare_match", {
+        p_match_id: job.match_id,
+        p_source: job.contestant_code,
+        p_sha256: job.sha256,
+      });
+      if (match?.ready) {
+        job.status = "queued";
+        job.benchmark_code = match.opponent_code;
+        const queue = await this.state.storage.get("queue") || [];
+        queue.push(job.job_id);
+        await this.state.storage.put("queue", queue);
+        await this.state.storage.put(`job:${job.job_id}`, job);
+        await this.state.storage.setAlarm(Date.now());
+      }
+    } catch (error) {
+      console.log(`waiting_job_check_failed:${String(error).slice(0, 200)}`);
+    }
+    return job;
   }
 
   async alarm() {
@@ -445,6 +527,12 @@ class ScoringQueue {
         throw error;
       }
       const result = parseCompilerResult(payload);
+      if (job.match_id && job.auth_token) {
+        await supabaseRpc(this.env, job.auth_token, "proxy_complete_match", {
+          p_match_id: job.match_id,
+          p_score_a: result.match_score,
+        });
+      }
       await this.finish(job, result);
     } catch (error) {
       const message = error instanceof Error ? error.message : "upstream_error";
@@ -505,8 +593,12 @@ export default {
       return jsonResponse({ ok: true, service: "ott-cloudflare-proxy" });
     }
     if (request.method === "GET" && url.pathname.startsWith("/v1/score/")) {
+      const user = await authenticate(request, env);
+      if (!user) return jsonResponse({ detail: "Supabase login required" }, 401);
       const id = env.SCORING_QUEUE.idFromName("global");
-      return env.SCORING_QUEUE.get(id).fetch(`https://queue/jobs/${url.pathname.slice(10)}`);
+      return env.SCORING_QUEUE.get(id).fetch(`https://queue/jobs/${url.pathname.slice(10)}`, {
+        headers: { "x-user-id": user.id },
+      });
     }
     if ((request.method === "GET" || request.method === "DELETE") && url.pathname === "/v1/admin/queue") {
       const expected = env.QUEUE_ADMIN_TOKEN;
@@ -524,6 +616,8 @@ export default {
     }
 
     try {
+      const user = await authenticate(request, env);
+      if (!user) return jsonResponse({ detail: "Supabase login required" }, 401);
       const contentLength = Number(request.headers.get("content-length") || 0);
       if (contentLength > MAX_REQUEST_BYTES) {
         return jsonResponse({ detail: "Request too large" }, 413);
@@ -532,25 +626,48 @@ export default {
       const body = await request.json();
       const contestant = body?.contestant_code;
       const benchmark = body?.benchmark_code;
-      if (typeof contestant !== "string" || typeof benchmark !== "string") {
-        return jsonResponse({ detail: "contestant_code and benchmark_code are required" }, 400);
+      const matchId = body?.match_id;
+      if (typeof contestant !== "string" || (typeof benchmark !== "string" && !Number.isInteger(matchId))) {
+        return jsonResponse({ detail: "contestant_code and either benchmark_code or match_id are required" }, 400);
       }
-      if (!contestant.trim() || !benchmark.trim()) {
+      if (!contestant.trim() || (typeof benchmark === "string" && !benchmark.trim())) {
         return jsonResponse({ detail: "Source code must not be empty" }, 400);
       }
       if (new TextEncoder().encode(contestant).byteLength > MAX_SOURCE_BYTES ||
-          new TextEncoder().encode(benchmark).byteLength > MAX_SOURCE_BYTES) {
+          (typeof benchmark === "string" && new TextEncoder().encode(benchmark).byteLength > MAX_SOURCE_BYTES)) {
         return jsonResponse({ detail: "Each source file is limited to 64 KiB" }, 413);
       }
       if (!env.ONLINECOMPILER_API_KEY) {
         return jsonResponse({ detail: "ONLINECOMPILER_API_KEY is not configured" }, 503);
       }
 
+      let opponentCode = benchmark;
+      if (Number.isInteger(matchId)) {
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(contestant));
+        const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+        const match = await supabaseRpc(env, user.token, "proxy_prepare_match", {
+          p_match_id: matchId, p_source: contestant, p_sha256: sha256,
+        });
+        if (!match?.ready) {
+          const waitingId = crypto.randomUUID();
+          const queue = env.SCORING_QUEUE.idFromName("global");
+          return env.SCORING_QUEUE.get(queue).fetch("https://queue/enqueue-waiting", {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-user-id": user.id },
+            body: JSON.stringify({
+              job_id: waitingId, user_id: user.id, match_id: matchId,
+              auth_token: user.token, contestant_code: contestant, sha256,
+            }),
+          });
+        }
+        opponentCode = match.opponent_code;
+      }
+
       const id = env.SCORING_QUEUE.idFromName("global");
       const queueResponse = await env.SCORING_QUEUE.get(id).fetch("https://queue/enqueue", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ contestant_code: contestant, benchmark_code: benchmark }),
+        body: JSON.stringify({ contestant_code: contestant, benchmark_code: opponentCode, user_id: user.id, auth_token: user.token, match_id: matchId ?? null }),
       });
       return queueResponse;
     } catch (error) {

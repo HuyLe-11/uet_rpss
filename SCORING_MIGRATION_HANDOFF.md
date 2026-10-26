@@ -185,6 +185,110 @@ Những file cũ trong phần checklist phía trên được giữ làm lịch s
 - Build frontend đã chạy thành công sau thay đổi admin/URL. Chưa xác nhận SQL `0005` đã chạy và chưa xác minh deploy thực tế.
 - Chưa deploy-ready cho giải đấu đầy đủ: chấm giải ngày, close, ghép cặp, live/offline scoring, advancement và các đường SQLite còn lại chưa migrate. Có thể deploy để demo luồng auth, entry scoring, replay đã chuyển và quan sát cơ bản sau khi áp dụng `0005` và cấu hình env/CORS/tunnel.
 
+## Cập nhật chuyển sang Cloudflare Worker trực tiếp (2026-10-27)
+
+Đây là trạng thái code mới nhất sau khi chủ dự án yêu cầu loại bỏ scoring
+module chạy trên laptop khỏi đường truy cập web. **Các thay đổi trong workspace
+chưa được deploy production và chưa được apply lên Supabase thật.**
+
+### Đã triển khai trong workspace
+
+- Thêm đường gọi trực tiếp từ frontend tới Cloudflare Worker bằng
+  `VITE_SCORING_PROXY_URL`; request dùng Supabase access token trong header
+  `Authorization: Bearer <JWT>`.
+- Worker xác thực JWT bằng Supabase Auth endpoint trước khi nhận yêu cầu.
+  `ONLINECOMPILER_API_KEY` chỉ được đọc từ Worker secret.
+- Thêm Durable Object job polling cho `POST /v1/score` và
+  `GET /v1/score/{job_id}`; job được giới hạn quyền đọc theo `user_id`.
+- Thêm migration `0017_cloudflare_proxy_matches.sql` với bảng tạm
+  `proxy_match_submissions` và RPC:
+  `proxy_prepare_match`, `proxy_complete_match`.
+- Thêm migration `0018_proxy_match_context.sql`; RPC
+  `get_my_today_matches()` trả thêm `match_id` để frontend gửi đúng cặp đấu.
+- Với trận chính, frontend gửi source bot và `match_id`. Worker lưu source theo
+  `(match_id, user_id)`, chạy ngay khi có source của cả hai bên, sau đó gọi RPC
+  ghi `score_a`/`points_a`/`points_b` và xóa source tạm.
+- Nếu đối thủ chưa gửi, Worker trả trạng thái chờ với thời hạn mục tiêu 60 giây.
+  Cơ chế timeout/retry cần kiểm thử trên Durable Object thật trước khi coi là
+  production-ready.
+- Giữ fallback scoring module/Judge0 cũ theo yêu cầu rollback. Khi
+  `VITE_SCORING_PROXY_URL` chưa cấu hình hoặc chưa có `match_id`, frontend vẫn
+  đi theo flow scoring job cũ.
+- Arena đã đổi sang OnlineCompiler widget, có template bot bên dưới và nút
+  copy template. Arena không ghi điểm vào thành tích giải.
+- Màn hình chính đã có nút `Nộp bài`, IDE Monaco lớn hơn, lựa chọn file/code,
+  menu Python hiện tại và lịch sử đấu có opponent ID/điểm/trạng thái.
+- Tab `Luật thi đấu` được đổi thành `Tài liệu và trạng thái`; tiến trình thi
+  đấu được đưa vào tab này.
+- Đã xóa key OnlineCompiler khỏi `frontend/.env` hiện có trong workspace.
+  Widget chỉ đọc `VITE_ONLINE_COMPILER_KEY` nếu ban tổ chức cấp một widget key
+  public riêng; không dùng API secret của OnlineCompiler.
+
+### Cấu hình cần có khi deploy Worker
+
+Trong `servers/scoring/cloudflare_proxy/`:
+
+```sh
+npx wrangler secret put ONLINECOMPILER_API_KEY
+npx wrangler secret put SUPABASE_ANON_KEY
+npx wrangler deploy
+```
+
+`SUPABASE_URL` là biến Worker trong `wrangler.toml`, cần đổi từ giá trị mẫu
+thành project thật. Frontend cần:
+
+```env
+VITE_SCORING_PROXY_URL=https://<worker-domain>
+VITE_ONLINE_COMPILER_KEY=<public-widget-key-if-provided>
+```
+
+Không đưa `ONLINECOMPILER_API_KEY`, Supabase service-role key hoặc queue admin
+token vào frontend/Vercel.
+
+### Việc bắt buộc trước khi dùng thật
+
+- [ ] Apply `0017_cloudflare_proxy_matches.sql` và
+  `0018_proxy_match_context.sql` sau các migration nền tảng hiện có.
+- [ ] Kiểm tra schema `public.matches` đang có các cột `state`,
+  `points_a`, `points_b`, `started_at`, `finished_at`; hai migration mới phụ
+  thuộc vào các cột này.
+- [ ] Deploy Worker với Supabase URL/key thật và kiểm tra CORS preflight,
+  JWT hết hạn, user không thuộc match, match ID giả và job của user khác.
+- [ ] Kiểm thử hai tài khoản gửi cùng `match_id`: gửi trước, gửi sau, gửi lại,
+  gửi sai cặp và timeout 60 giây.
+- [ ] Xác minh việc ghi kết quả qua RPC không làm mất logic finalize ngày,
+  bảng xếp hạng, replay và chuyển vòng.
+- [ ] Bổ sung/chốt đường vòng loại trực tiếp trên Worker nếu muốn loại bỏ
+  scoring module hoàn toàn. Hiện vòng loại chưa có catalog bot và phép tính
+  trọng số `1×s0 + 2×s1 + 3×s2` trên Worker.
+- [ ] Cài Node.js rồi chạy `npm install` và `npm run build` trong `frontend`.
+- [ ] Cấu hình widget key public và kiểm tra widget OnlineCompiler thực tế.
+
+### Giới hạn và rủi ro đã biết
+
+- Cloudflare Free/Durable Objects không nên được xem là đã chịu tải giải thật
+  chỉ dựa trên load test cũ. Cần đo queue wait, giới hạn OnlineCompiler,
+  retry/429 và số trận đồng thời trên deployment thật.
+- Source bot và access token đang được giữ trong Durable Object job state để
+  Worker có thể gọi Supabase sau khi job hoàn tất. Cần đánh giá lại retention,
+  log redaction và cách revoke token; không ghi source/token vào log.
+- Việc Worker gọi RPC bằng JWT người dùng giúp giữ RLS/user scope, nhưng RPC
+  `proxy_complete_match` hiện cho phép một trong hai người chơi gọi và quy đổi
+  hướng điểm theo người gọi. Cần test kỹ tính đối xứng score trước production.
+- Luồng chấm official mới đã được nối ở frontend nhưng chưa thay thế toàn bộ
+  các luồng `entry`/`test`; fallback cũ vẫn tồn tại có chủ đích.
+- `VITE_ONLINE_COMPILER_KEY` là public widget key, không phải secret. Nếu
+  OnlineCompiler không cấp widget key public hoặc widget cần secret, Arena
+  phải tiếp tục dùng proxy và không được đưa secret vào bundle.
+
+### Kiểm thử đã chạy trong workspace
+
+- `python3 -m py_compile servers/scoring/module.py servers/scoring/judge0_runner.py`
+  đã chạy thành công.
+- `git diff --check` đã chạy thành công.
+- Chưa chạy được build/type-check frontend vì môi trường hiện tại không có
+  `node`, `npm` hoặc `npx`.
+
 ## Quản trị reset và phục hồi ngày thi (2026-10-22)
 
 - Admin sidebar có menu độc lập `Thí sinh bị loại`; có thể ban/gỡ ban. Gỡ ban khôi phục `new` khi ở đầu vào, hoặc `active` nếu vẫn có thành viên ở vòng hiện hành. Người bị ban bị loại khỏi ghép Swiss mới; các trận chờ của họ được xử thua. Không cho ban khi trận của người đó đang chạy.

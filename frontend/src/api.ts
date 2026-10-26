@@ -6,6 +6,7 @@ const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJ
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const DEFAULT_SCORING_MODULE_URL = (import.meta.env.VITE_SCORING_MODULE_URL || '').replace(/\/$/, '');
+const DEFAULT_SCORING_PROXY_URL = (import.meta.env.VITE_SCORING_PROXY_URL || '').replace(/\/$/, '');
 const SCORING_URL_STORAGE_KEY = 'ott.scoring_module_url';
 
 export function getSavedScoringUrl(): string {
@@ -17,6 +18,54 @@ export function saveScoringUrl(value: string) {
   if (typeof localStorage === 'undefined') return;
   if (value.trim()) localStorage.setItem(SCORING_URL_STORAGE_KEY, value.trim().replace(/\/+$/, ''));
   else localStorage.removeItem(SCORING_URL_STORAGE_KEY);
+}
+
+export function getScoringProxyUrl(): string {
+  return DEFAULT_SCORING_PROXY_URL;
+}
+
+export type ProxyScoreJob = {
+  job_id: string;
+  status: 'waiting' | 'queued' | 'running' | 'succeeded' | 'failed';
+  match_score?: number;
+  games?: ReplayGame[];
+  error_code?: string;
+  error?: string;
+};
+
+export async function submitProxyScore(
+  source: string,
+  options: { matchId?: number; benchmarkCode?: string },
+): Promise<ProxyScoreJob> {
+  const base = getScoringProxyUrl();
+  if (!base) throw new Error('Chưa cấu hình Cloudflare scoring proxy.');
+  const token = await getAccessToken();
+  if (!token) throw new Error('Phiên đăng nhập đã hết hạn.');
+  const response = await fetch(`${base}/v1/score`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contestant_code: source,
+      match_id: options.matchId,
+      benchmark_code: options.benchmarkCode,
+    }),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(payload?.detail || `Cloudflare proxy trả HTTP ${response.status}.`);
+  return payload as ProxyScoreJob;
+}
+
+export async function pollProxyScore(jobId: string): Promise<ProxyScoreJob> {
+  const base = getScoringProxyUrl();
+  const token = await getAccessToken();
+  if (!base || !token) throw new Error('Phiên đăng nhập đã hết hạn hoặc chưa cấu hình scoring proxy.');
+  const response = await fetch(`${base}/v1/score/${encodeURIComponent(jobId)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: 'no-store',
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(payload?.detail || `Không đọc được trạng thái chấm (HTTP ${response.status}).`);
+  return payload as ProxyScoreJob;
 }
 
 function normalizeScoringUrl(value: string): string {
@@ -265,6 +314,7 @@ export interface Standing {
 }
 
 export interface TodayMatch {
+  match_id: number;
   rnd: number;
   day: number;
   rd: number;

@@ -2,6 +2,9 @@ name = "uetrps-scoring-proxy"
 main = "worker.js"
 compatibility_date = "2026-10-26"
 
+[vars]
+SUPABASE_URL = "https://your-project.supabase.co"
+
 [durable_objects]
 bindings = [
   { name = "SCORING_QUEUE", class_name = "ScoringQueue" }
@@ -12,3 +15,4 @@ tag = "v1"
 new_sqlite_classes = ["ScoringQueue"]
 
 # Set with: npx wrangler secret put QUEUE_ADMIN_TOKEN
+# Set SUPABASE_URL as a Worker variable and SUPABASE_ANON_KEY as a secret.

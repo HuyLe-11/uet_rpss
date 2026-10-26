@@ -1,8 +1,10 @@
 # Cloudflare scoring proxy
 
-This worker is not wired into the current frontend, Supabase, or scoring
-module. It accepts two Python bot sources, runs the existing OTT BO2 rules in
-one OnlineCompiler submission, and returns `match_score` in `-2..2`.
+The web-facing scoring module authenticates contestants and keeps Supabase
+tournament state. When `OTT_SCORING_PROXY_URL` and
+`OTT_SCORING_PROXY_TOKEN` are configured on that module, every qualification,
+practice, and official BO2 is executed by this Worker through OnlineCompiler.
+The browser never receives the Worker service token or the OnlineCompiler key.
 
 The JavaScript entrypoint is [`worker.js`](./worker.js).
 
@@ -12,6 +14,7 @@ Deploy the JavaScript Worker from this directory:
 
 ```sh
 npx wrangler secret put ONLINECOMPILER_API_KEY
+npx wrangler secret put SUPABASE_ANON_KEY
 npx wrangler dev
 npx wrangler deploy
 ```
@@ -33,17 +36,25 @@ For local development, create `.dev.vars` (do not commit it):
 ONLINECOMPILER_API_KEY=your-api-key
 ```
 
-## Request contract
+## Browser request contract
 
-`POST /v1/score` with JSON:
+``POST /v1/score` with JSON:
 
 ```json
 {"contestant_code": "...", "benchmark_code": "..."}
 ```
 
-The response is `{"ok":true,"match_score":-2..2,"games":[...]}`. The current
-browser still submits `multipart/form-data` to `/v1/jobs/{job_id}` and remains
-unchanged; an integration adapter will be needed later.
+The request must include the contestant's `Authorization: Bearer <Supabase JWT>`.
+Configure `SUPABASE_URL` and `SUPABASE_ANON_KEY` as Worker variables/secrets.
+The Worker validates the JWT through Supabase before accepting a job. The
+response is initially `202` with a `job_id`; the browser polls
+`GET /v1/score/{job_id}` with the same JWT.
+
+For an official match, send `match_id`; the Worker calls the
+`proxy_prepare_match` RPC and waits for the other contestant's source for up
+to 60 seconds. For a standalone practice request, send `benchmark_code`
+instead. The official match completion calls `proxy_complete_match`, so the
+browser does not need a privileged Supabase key.
 
 To run a real BO2 request using the repository's bots:
 

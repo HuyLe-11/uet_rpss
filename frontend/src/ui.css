@@ -116,12 +116,31 @@
 .arena-external-link{display:inline-flex;align-items:center;gap:6px;color:var(--tone-blue);font-size:12px;white-space:nowrap}
 .arena-widget-status{margin:0 0 12px;color:var(--ui-muted);font-size:12px}
 .arena-editor{border:1px solid var(--ui-border);background:var(--ui-surface);overflow:hidden}
+.arena-widget{min-height:420px;border:1px solid var(--ui-border);background:var(--ui-surface);overflow:auto}
+.arena-template-panel{padding:20px}
+.arena-template-code{display:block;width:100%;min-height:260px;box-sizing:border-box;padding:16px;border:1px solid var(--ui-border);background:#10141c;color:#d9e7f7;font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical}
+.banner-actions{display:flex;flex-wrap:wrap;gap:10px}
+.content-grid>.upload-panel{order:2}
+.content-grid>.match-history-panel{order:1}
+.match-history-list{display:flex;flex-direction:column;gap:8px;margin:12px 0 18px}
+.match-history-row{display:grid;grid-template-columns:42px minmax(0,1fr) auto;gap:5px 10px;padding:10px;border:1px solid var(--ui-border);font-size:12px}
+.match-history-row small{grid-column:2;color:var(--ui-muted);font-size:10px}
+.match-history-row b{grid-column:3;grid-row:1 / span 2;color:var(--ui-muted);font-size:10px}
+.history-score-card{display:flex;justify-content:space-between;padding:12px 0;margin-bottom:14px;border-top:1px solid var(--ui-border);color:var(--ui-muted)}
+.history-score-card strong{color:var(--tone-blue);font-size:20px}
+.language-select{display:block;margin-top:4px;padding:4px 6px;border:1px solid var(--ui-border);background:var(--ui-surface);color:var(--ui-text);font-weight:700}
+.arena-benchmarks{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-top:14px;color:var(--ui-muted);font-size:12px}
+.arena-benchmarks label{display:inline-flex;align-items:center;gap:5px}
+.editor-mode-tabs{display:flex;gap:8px;margin:0 0 10px}
+.editor-mode-tabs button{border:1px solid var(--ui-border);background:transparent;color:var(--ui-muted);padding:7px 12px;cursor:pointer}
+.editor-mode-tabs button.active{border-color:var(--tone-blue);color:var(--tone-blue);background:color-mix(in srgb,var(--tone-blue) 10%,transparent)}
 @media(max-width:640px){
   .arena-intro{padding:20px;align-items:flex-start}
   .arena-intro h2{font-size:24px}
   .arena-icon{width:46px;height:46px;flex-shrink:0}
   .arena-editor-panel{padding:14px}
   .arena-editor-heading{flex-direction:column;gap:10px}
+  .content-grid>.upload-panel,.content-grid>.match-history-panel{order:initial}
 }
 
 /* Refinements */
