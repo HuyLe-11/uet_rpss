@@ -27,6 +27,7 @@ import Auth, { Brand } from './Auth';
 import Replay from './Replay';
 import SubmissionHistory from './SubmissionHistory';
 import AdminDashboard from './AdminDashboard';
+import Arena from './Arena';
 import { createAndDispatchScoringJob, getMyTodayMatches, getReplayMetadata, getSavedScoringUrl, getScoringBenchmarks, getWebDashboard, saveScoringUrl, supabase, type Replays, type ScoringBenchmark, type ScoringJob, type ScoringState, type Standing, type Status, type TodayMatch, type User } from './api';
 
 const emptyReplays: Replays = { available: [], round: null, day: null, matches: [], allMatches: [] };
@@ -43,7 +44,7 @@ const statusLabel: Record<string, string> = {
 function routeForPath(path: string, isAdmin: boolean) {
   if (isAdmin) return path.startsWith('/admin') ? path : '/admin';
   if (path.startsWith('/admin')) return '/';
-  return ['/submission', '/ranking', '/replay', '/rules'].includes(path) ? path : '/';
+  return ['/arena', '/submission', '/ranking', '/replay', '/rules'].includes(path) ? path : '/';
 }
 
 function useRoute(isAdmin: boolean) {
@@ -147,7 +148,7 @@ export default function App() {
 function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
   const { path, navigate } = useRoute(user.role === 'admin');
   const isAdminPage = path.startsWith('/admin');
-  const tab = isAdminPage ? 'admin' : path === '/submission' ? 'submission' : path === '/ranking' ? 'ranking' : path === '/replay' ? 'replay' : path === '/rules' ? 'rules' : 'overview';
+  const tab = isAdminPage ? 'admin' : path === '/arena' ? 'arena' : path === '/submission' ? 'submission' : path === '/ranking' ? 'ranking' : path === '/replay' ? 'replay' : path === '/rules' ? 'rules' : 'overview';
   const [status, setStatus] = useState<Status | null>(null);
   const [standings, setStandings] = useState<Standing[]>([]);
   const [replays, setReplays] = useState<Replays>(emptyReplays);
@@ -298,6 +299,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
 
   const baseNavigation = [
     ['overview', LayoutDashboard, 'Tổng quan'],
+    ['arena', Code2, 'Code Arena'],
     ['submission', Upload, 'Nộp bài'],
     ['ranking', Trophy, 'Bảng xếp hạng'],
     ['replay', Swords, 'Phát lại trận đấu'],
@@ -313,7 +315,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
   ] as const;
   const navigation = user.role === 'admin' ? adminNavigation : baseNavigation;
   const routeByTab: Record<string, string> = {
-    overview: '/', submission: '/submission', ranking: '/ranking', replay: '/replay', rules: '/rules', admin: '/admin',
+    overview: '/', arena: '/arena', submission: '/submission', ranking: '/ranking', replay: '/replay', rules: '/rules', admin: '/admin',
     admin_tournament: '/admin', admin_eliminated: '/admin/eliminated', admin_server: '/admin/server',
     admin_observation: '/admin/observation', admin_monitor: '/admin/monitor',
   };
@@ -450,6 +452,8 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
           )}
 
           {isAdminPage && <AdminDashboard route={path} navigate={navigate} />}
+
+          {tab === 'arena' && <Arena />}
 
           {(tab === 'overview' || tab === 'submission') && (
             <>

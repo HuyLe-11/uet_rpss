@@ -26,6 +26,11 @@ servers/scoring/*
 !servers/scoring/*.md
 !servers/scoring/.env.example
 !servers/scoring/config.local.env
+!servers/scoring/cloudflare_proxy/
+!servers/scoring/cloudflare_proxy/*
+servers/scoring/cloudflare_proxy/.wrangler/
+servers/scoring/cloudflare_proxy/.dev.vars
+servers/scoring/cloudflare_proxy/log/*.jsonl
 !servers/scoring/judge0-v1.13.0/
 servers/scoring/judge0-v1.13.0/*
 !servers/scoring/judge0-v1.13.0/docker-compose.yml

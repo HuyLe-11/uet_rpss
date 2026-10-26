@@ -104,6 +104,26 @@
 
 .admin-sidebar .sidebar-tools{margin-top:auto}
 
+/* Code Arena */
+.arena-page{display:flex;flex-direction:column;gap:18px}
+.arena-intro{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:24px 26px;background:linear-gradient(135deg,#122c49,#0b5ea8);color:#fff}
+.arena-intro h2{margin:4px 0 8px;font-size:28px}
+.arena-intro p:last-child{margin:0;max-width:620px;color:#dceeff;font-size:13px;line-height:1.6}
+.arena-icon{display:grid;place-items:center;width:58px;height:58px;border:1px solid #ffffff55;background:#ffffff18;color:#d8edff}
+.arena-editor-panel{padding:20px}
+.arena-editor-heading{align-items:flex-start;margin-bottom:16px}
+.arena-editor-heading p{margin:6px 0 0;color:var(--ui-muted);font-size:12px}
+.arena-external-link{display:inline-flex;align-items:center;gap:6px;color:var(--tone-blue);font-size:12px;white-space:nowrap}
+.arena-widget-status{margin:0 0 12px;color:var(--ui-muted);font-size:12px}
+.arena-editor{border:1px solid var(--ui-border);background:var(--ui-surface);overflow:hidden}
+@media(max-width:640px){
+  .arena-intro{padding:20px;align-items:flex-start}
+  .arena-intro h2{font-size:24px}
+  .arena-icon{width:46px;height:46px;flex-shrink:0}
+  .arena-editor-panel{padding:14px}
+  .arena-editor-heading{flex-direction:column;gap:10px}
+}
+
 /* Refinements */
 .brand-light{margin-left:0}
 .logo-pair img{background:#fff;padding:2px}
@@ -324,4 +344,3 @@
   color: var(--ui-muted) !important;
   padding: 0 4px !important;
 }
-

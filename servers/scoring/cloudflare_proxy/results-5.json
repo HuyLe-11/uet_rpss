@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "config": {
+    "url": "https://uetrps-scoring-proxy.huylekq11.workers.dev/v1/score",
+    "requests": 5,
+    "concurrency": 5,
+    "timeout_seconds": 180.0,
+    "contestant": "/Users/huyle/Documents/dev/LTM/Thi_dau_bot_OTT_N3/sample_bots/sample_bot.py",
+    "benchmark": "/Users/huyle/Documents/dev/LTM/Thi_dau_bot_OTT_N3/sample_bots/entry_bot0.py"
+  },
+  "summary": {
+    "requests": 5,
+    "concurrency": 5,
+    "wall_time_seconds": 2.1698515419993782,
+    "throughput_completed_per_second": 2.3043051117648456,
+    "successes": 3,
+    "failures": 2,
+    "status_counts": {
+      "200": 3,
+      "502": 2
+    },
+    "latency_ms": {
+      "mean": 1335.308216598787,
+      "p50": 1441.2952919992676,
+      "p95": 2023.1985581995104,
+      "p99": 2135.181011639361,
+      "max": 2163.1766249993234
+    },
+    "client_queue_time_ms": {
+      "mean": 0.4915918005281128,
+      "p50": 0.5628339968097862,
+      "p95": 0.68650000175694,
+      "p99": 0.70580000145128,
+      "max": 0.710625001374865
+    },
+    "total_time_ms": {
+      "mean": 1335.7998083993152,
+      "p50": 1442.0059170006425,
+      "p95": 2023.7505249977403,
+      "p99": 2135.7308049978747,
+      "max": 2163.7258749979082
+    }
+  },
+  "results": [
+    {
+      "request_id": "ce612e37-0b89-4c77-acd4-5869acf185ff",
+      "index": 0,
+      "status": 200,
+      "success": true,
+      "match_score": 2,
+      "queue_time_ms": 0.710625001374865,
+      "latency_ms": 1441.2952919992676,
+      "total_time_ms": 1442.0059170006425,
+      "started_at": 25812.865563583,
+      "completed_at": 25814.306858875,
+      "error": null,
+      "response_bytes": 2041
+    },
+    {
+      "request_id": "bcc7d0d8-6468-468a-8623-2b849a2312d8",
+      "index": 1,
+      "status": 502,
+      "success": false,
+      "match_score": null,
+      "queue_time_ms": 0.5900000032852404,
+      "latency_ms": 793.2736249968002,
+      "total_time_ms": 793.8636250000854,
+      "started_at": 25812.865639791,
+      "completed_at": 25813.658913416,
+      "error": "HTTP 502",
+      "response_bytes": 70
+    },
+    {
+      "request_id": "b5f0b2ac-b7ff-44aa-ae26-d71fcaaeaa16",
+      "index": 2,
+      "status": 200,
+      "success": true,
+      "match_score": 2,
+      "queue_time_ms": 0.5628339968097862,
+      "latency_ms": 1463.2862910002586,
+      "total_time_ms": 1463.8491249970684,
+      "started_at": 25812.865702375,
+      "completed_at": 25814.328988666,
+      "error": null,
+      "response_bytes": 2041
+    },
+    {
+      "request_id": "f61bcfd8-74e8-44da-8edc-e7dc4e4a79a4",
+      "index": 3,
+      "status": 200,
+      "success": true,
+      "match_score": 2,
+      "queue_time_ms": 0.5492499985848553,
+      "latency_ms": 2163.1766249993234,
+      "total_time_ms": 2163.7258749979082,
+      "started_at": 25812.865753166,
+      "completed_at": 25815.028929791,
+      "error": null,
+      "response_bytes": 2041
+    },
+    {
+      "request_id": "a5ea3fd8-4142-4492-92c9-93696f4c204b",
+      "index": 4,
+      "status": 502,
+      "success": false,
+      "match_score": null,
+      "queue_time_ms": 0.04525000258581713,
+      "latency_ms": 815.5092499982857,
+      "total_time_ms": 815.5545000008715,
+      "started_at": 25812.865291875,
+      "completed_at": 25813.680801125,
+      "error": "HTTP 502",
+      "response_bytes": 70
+    }
+  ]
+}
