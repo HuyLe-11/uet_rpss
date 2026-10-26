@@ -56,6 +56,14 @@ to 60 seconds. For a standalone practice request, send `benchmark_code`
 instead. The official match completion calls `proxy_complete_match`, so the
 browser does not need a privileged Supabase key.
 
+Official match jobs are keyed by `match_id` inside the Durable Object. If both
+contestants submit at nearly the same time, their requests share one queue job
+and one OnlineCompiler execution; both contestants can poll that job.
+
+Apply the Supabase migration `0018_proxy_match_opponent_id.sql` before
+deploying this Worker version so the preparation RPC returns the opponent ID
+needed for that shared-job authorization.
+
 To run a real BO2 request using the repository's bots:
 
 ```sh

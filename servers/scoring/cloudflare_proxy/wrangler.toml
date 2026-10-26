@@ -3,7 +3,7 @@ main = "worker.js"
 compatibility_date = "2026-10-26"
 
 [vars]
-SUPABASE_URL = "https://your-project.supabase.co"
+SUPABASE_URL = "https://etrvnyvmqkgdfujolref.supabase.co"
 
 [durable_objects]
 bindings = [

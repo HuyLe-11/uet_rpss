@@ -3,7 +3,10 @@ import { createClient } from '@supabase/supabase-js';
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'https://etrvnyvmqkgdfujolref.supabase.co';
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV0cnZueXZtcWtnZGZ1am9scmVmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIzMDc1NTUsImV4cCI6MjEwNzg4MzU1NX0.J9oh0x4-PJK7yEIjIQa14pK4jduwTyrR36fgNTtEBvA';
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+export const supabase = createClient(
+  SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || SUPABASE_ANON_KEY,
+);
 
 const DEFAULT_SCORING_MODULE_URL = (import.meta.env.VITE_SCORING_MODULE_URL || '').replace(/\/$/, '');
 const DEFAULT_SCORING_PROXY_URL = (import.meta.env.VITE_SCORING_PROXY_URL || '').replace(/\/$/, '');
@@ -28,6 +31,9 @@ export type ProxyScoreJob = {
   job_id: string;
   status: 'waiting' | 'queued' | 'running' | 'succeeded' | 'failed';
   match_score?: number;
+  qualification_score?: number;
+  passed?: boolean;
+  match_result?: 'win' | 'loss' | 'draw';
   games?: ReplayGame[];
   error_code?: string;
   error?: string;
@@ -35,7 +41,7 @@ export type ProxyScoreJob = {
 
 export async function submitProxyScore(
   source: string,
-  options: { matchId?: number; benchmarkCode?: string },
+  options: { matchId?: number; benchmarkCode?: string; jobId?: string },
 ): Promise<ProxyScoreJob> {
   const base = getScoringProxyUrl();
   if (!base) throw new Error('Chưa cấu hình Cloudflare scoring proxy.');
@@ -48,6 +54,7 @@ export async function submitProxyScore(
       contestant_code: source,
       match_id: options.matchId,
       benchmark_code: options.benchmarkCode,
+      job_id: options.jobId,
     }),
   });
   const payload = await response.json().catch(() => null);
@@ -130,7 +137,7 @@ export async function postScoringAdmin<T = Record<string, unknown>>(value: strin
   if (!token) throw new Error('Phiên đăng nhập đã hết hạn.');
   const response = await fetch(`${base}${path}`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
     cache: 'no-store',
   });

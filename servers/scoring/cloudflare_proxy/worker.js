@@ -17,7 +17,14 @@ const ONLINECOMPILER_URL = "https://api.onlinecompiler.io/api/run-code-sync/";
 
 async function authenticate(request, env) {
   const token = request.headers.get("authorization");
-  if (!token?.match(/^Bearer\s+\S+$/i) || !env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) return null;
+  if (!token?.match(/^Bearer\s+\S+$/i)) return null;
+  if (
+    !env.SUPABASE_URL ||
+    env.SUPABASE_URL === "https://your-project.supabase.co" ||
+    !env.SUPABASE_ANON_KEY
+  ) {
+    throw new Error("supabase_auth_not_configured");
+  }
   const response = await fetch(`${env.SUPABASE_URL.replace(/\/$/, "")}/auth/v1/user`, {
     headers: { apikey: env.SUPABASE_ANON_KEY, authorization: token },
   });
@@ -57,6 +64,14 @@ function corsHeaders() {
     "access-control-allow-methods": "GET,POST,OPTIONS",
     "access-control-allow-headers": "authorization,content-type",
   };
+}
+
+function supabaseAuthConfigured(env) {
+  return Boolean(
+    env.SUPABASE_URL &&
+    env.SUPABASE_URL !== "https://your-project.supabase.co" &&
+    env.SUPABASE_ANON_KEY,
+  );
 }
 
 function utf8Base64(value) {
@@ -269,7 +284,15 @@ function parseCompilerResult(payload) {
   if (!Array.isArray(result.games) || result.games.length !== 2) {
     throw new Error("Compiler returned an invalid BO2 replay");
   }
-  return { ok: true, match_score: result.match_score, games: result.games };
+  const matchResult = result.match_score > 0 ? "win" : result.match_score < 0 ? "loss" : "draw";
+  return {
+    ok: true,
+    match_score: result.match_score,
+    qualification_score: result.match_score,
+    passed: result.match_score > 0,
+    match_result: matchResult,
+    games: result.games,
+  };
 }
 
 function publicJob(job) {
@@ -284,6 +307,9 @@ function publicJob(job) {
   };
   if (job.status === "succeeded") {
     result.match_score = job.result.match_score;
+    result.qualification_score = job.result.qualification_score;
+    result.passed = job.result.passed;
+    result.match_result = job.result.match_result;
     result.games = job.result.games;
   }
   if (job.status === "failed") {
@@ -311,7 +337,9 @@ class ScoringQueue {
     if (request.method === "GET" && url.pathname.startsWith("/jobs/")) {
       const jobId = url.pathname.slice(6);
       let job = await this.state.storage.get(`job:${jobId}`);
-      if (job?.user_id && job.user_id !== request.headers.get("x-user-id")) {
+      const userId = request.headers.get("x-user-id");
+      if (job?.user_id && job.user_id !== userId &&
+          !(Array.isArray(job.user_ids) && job.user_ids.includes(userId))) {
         return jsonResponse({ detail: "Job not found" }, 404);
       }
       if (job?.status === "waiting") {
@@ -344,8 +372,11 @@ class ScoringQueue {
     const entries = await this.state.storage.list({ prefix: "job:" });
     let deleted = 0;
     for (const [key, job] of entries) {
-      if (job.status === "queued" || job.status === "running") {
+      if (job.status === "waiting" || job.status === "queued" || job.status === "running") {
         await this.state.storage.delete(key);
+        if (Number.isInteger(job.match_id)) {
+          await this.state.storage.delete(`match:${job.match_id}`);
+        }
         deleted += 1;
       }
     }
@@ -354,31 +385,79 @@ class ScoringQueue {
   }
 
   async enqueue(body) {
+    if (Number.isInteger(body.match_id)) {
+      const existingId = await this.state.storage.get(`match:${body.match_id}`);
+      if (existingId) {
+        const existing = await this.state.storage.get(`job:${existingId}`);
+        if (existing) {
+          const userIds = new Set(existing.user_ids || []);
+          if (existing.user_id) userIds.add(existing.user_id);
+          if (body.user_id) userIds.add(body.user_id);
+          if (body.opponent_id) userIds.add(body.opponent_id);
+          existing.user_ids = [...userIds];
+          if (existing.status === "waiting") {
+            existing.status = "queued";
+            existing.benchmark_code = body.benchmark_code;
+            existing.auth_token = body.auth_token;
+            const queue = await this.state.storage.get("queue") || [];
+            if (!queue.includes(existing.job_id)) {
+              if (queue.length >= MAX_QUEUE_SIZE) {
+                return jsonResponse({ detail: "Scoring queue is full" }, 503);
+              }
+              queue.push(existing.job_id);
+              await this.state.storage.put("queue", queue);
+            }
+            await this.state.storage.setAlarm(Date.now());
+          }
+          await this.state.storage.put(`job:${existing.job_id}`, existing);
+          return jsonResponse(publicJob(existing), 202);
+        }
+        await this.state.storage.delete(`match:${body.match_id}`);
+      }
+    }
     const queue = await this.state.storage.get("queue") || [];
     if (queue.length >= MAX_QUEUE_SIZE) {
       return jsonResponse({ detail: "Scoring queue is full" }, 503);
     }
-    const jobId = crypto.randomUUID();
+    const jobId = body.job_id || crypto.randomUUID();
     const job = {
       job_id: jobId,
       status: "queued",
       contestant_code: body.contestant_code,
       benchmark_code: body.benchmark_code,
+      user_id: body.user_id,
+      user_ids: [body.user_id, body.opponent_id].filter(Boolean),
+      auth_token: body.auth_token,
+      match_id: Number.isInteger(body.match_id) ? body.match_id : null,
       created_at: new Date().toISOString(),
       attempts: 0,
     };
     queue.push(jobId);
     await this.state.storage.put(`job:${jobId}`, job);
+    if (Number.isInteger(job.match_id)) {
+      await this.state.storage.put(`match:${job.match_id}`, jobId);
+    }
     await this.state.storage.put("queue", queue);
     await this.state.storage.setAlarm(Date.now());
     return jsonResponse(publicJob({ ...job, position: queue.length }), 202);
   }
 
   async enqueueWaiting(body) {
+    const existingId = Number.isInteger(body.match_id)
+      ? await this.state.storage.get(`match:${body.match_id}`)
+      : null;
+    if (existingId) {
+      const existing = await this.state.storage.get(`job:${existingId}`);
+      if (existing && existing.status !== "failed") {
+        return jsonResponse(publicJob(existing), 202);
+      }
+      await this.state.storage.delete(`match:${body.match_id}`);
+    }
     const job = {
       job_id: body.job_id || crypto.randomUUID(),
       status: "waiting",
       user_id: body.user_id,
+      user_ids: [body.user_id, body.opponent_id].filter(Boolean),
       match_id: body.match_id,
       contestant_code: body.contestant_code || null,
       sha256: body.sha256 || null,
@@ -387,6 +466,9 @@ class ScoringQueue {
       attempts: 0,
     };
     await this.state.storage.put(`job:${job.job_id}`, job);
+    if (Number.isInteger(job.match_id)) {
+      await this.state.storage.put(`match:${job.match_id}`, job.job_id);
+    }
     return jsonResponse(publicJob(job), 202);
   }
 
@@ -407,8 +489,11 @@ class ScoringQueue {
       if (match?.ready) {
         job.status = "queued";
         job.benchmark_code = match.opponent_code;
+        if (match.opponent_id && !job.user_ids?.includes(match.opponent_id)) {
+          job.user_ids = [...(job.user_ids || []), match.opponent_id];
+        }
         const queue = await this.state.storage.get("queue") || [];
-        queue.push(job.job_id);
+        if (!queue.includes(job.job_id)) queue.push(job.job_id);
         await this.state.storage.put("queue", queue);
         await this.state.storage.put(`job:${job.job_id}`, job);
         await this.state.storage.setAlarm(Date.now());
@@ -592,6 +677,12 @@ export default {
     if (request.method === "GET" && url.pathname === "/v1/health") {
       return jsonResponse({ ok: true, service: "ott-cloudflare-proxy" });
     }
+    if (
+      url.pathname.startsWith("/v1/score") &&
+      !supabaseAuthConfigured(env)
+    ) {
+      return jsonResponse({ detail: "Worker Supabase authentication is not configured" }, 503);
+    }
     if (request.method === "GET" && url.pathname.startsWith("/v1/score/")) {
       const user = await authenticate(request, env);
       if (!user) return jsonResponse({ detail: "Supabase login required" }, 401);
@@ -642,20 +733,25 @@ export default {
       }
 
       let opponentCode = benchmark;
+      let opponentUserId = null;
+      const requestedJobId = typeof body?.job_id === "string" && body.job_id.trim()
+        ? body.job_id.trim()
+        : null;
       if (Number.isInteger(matchId)) {
         const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(contestant));
         const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
         const match = await supabaseRpc(env, user.token, "proxy_prepare_match", {
           p_match_id: matchId, p_source: contestant, p_sha256: sha256,
         });
+        opponentUserId = match?.opponent_id || null;
         if (!match?.ready) {
-          const waitingId = crypto.randomUUID();
           const queue = env.SCORING_QUEUE.idFromName("global");
           return env.SCORING_QUEUE.get(queue).fetch("https://queue/enqueue-waiting", {
             method: "POST",
             headers: { "content-type": "application/json", "x-user-id": user.id },
             body: JSON.stringify({
-              job_id: waitingId, user_id: user.id, match_id: matchId,
+              job_id: requestedJobId || crypto.randomUUID(), user_id: user.id, match_id: matchId,
+              opponent_id: match?.opponent_id,
               auth_token: user.token, contestant_code: contestant, sha256,
             }),
           });
@@ -667,7 +763,15 @@ export default {
       const queueResponse = await env.SCORING_QUEUE.get(id).fetch("https://queue/enqueue", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ contestant_code: contestant, benchmark_code: opponentCode, user_id: user.id, auth_token: user.token, match_id: matchId ?? null }),
+        body: JSON.stringify({
+          job_id: requestedJobId,
+          contestant_code: contestant,
+          benchmark_code: opponentCode,
+          user_id: user.id,
+          opponent_id: opponentUserId,
+          auth_token: user.token,
+          match_id: matchId ?? null,
+        }),
       });
       return queueResponse;
     } catch (error) {

@@ -31,7 +31,8 @@ import SubmissionHistory from './SubmissionHistory';
 import AdminDashboard from './AdminDashboard';
 import Arena from './Arena';
 import BotEditor from './BotEditor';
-import { createAndDispatchScoringJob, getMyTodayMatches, getReplayMetadata, getSavedScoringUrl, getScoringBenchmarks, getWebDashboard, getScoringProxyUrl, pollProxyScore, saveScoringUrl, submitProxyScore, supabase, type Replays, type ScoringBenchmark, type ScoringJob, type ScoringState, type Standing, type Status, type TodayMatch, type User } from './api';
+import { getMyTodayMatches, getReplayMetadata, getWebDashboard, getScoringProxyUrl, pollProxyScore, submitProxyScore, supabase, type Replays, type ScoringJob, type ScoringState, type Standing, type Status, type TodayMatch, type User } from './api';
+import { SAMPLE_BOTS } from './botTemplates';
 
 const emptyReplays: Replays = { available: [], round: null, day: null, matches: [], allMatches: [] };
 const statusLabel: Record<string, string> = {
@@ -171,12 +172,11 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [latestScoringKind, setLatestScoringKind] = useState<'entry' | 'submission' | 'test' | null>(null);
   const [scoringState, setScoringState] = useState<ScoringState | null>(null);
   const [champion, setChampion] = useState<string | null>(null);
-  const [scoringUrl, setScoringUrl] = useState(getSavedScoringUrl);
   const [todayMatches, setTodayMatches] = useState<TodayMatch[]>([]);
   const [practiceMode, setPracticeMode] = useState(false);
-  const [practiceBots, setPracticeBots] = useState<ScoringBenchmark[]>([]);
-  const [selectedPracticeBots, setSelectedPracticeBots] = useState<string[]>([]);
+  const [selectedPracticeBot, setSelectedPracticeBot] = useState(SAMPLE_BOTS[0]?.id || '');
   const [proxyJobMode, setProxyJobMode] = useState(false);
+  const [proxyDbJob, setProxyDbJob] = useState(false);
   const [ideFullscreen, setIdeFullscreen] = useState(false);
 
   useEffect(() => {
@@ -190,17 +190,6 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
   }, [ideFullscreen]);
 
   useEffect(() => { setIdeFullscreen(false); }, [tab]);
-
-  useEffect(() => {
-    if (!scoringUrl) { setPracticeBots([]); setSelectedPracticeBots([]); return; }
-    let cancelled = false;
-    void getScoringBenchmarks(scoringUrl).then((items) => {
-      if (cancelled) return;
-      setPracticeBots(items);
-      setSelectedPracticeBots((current) => current.length ? current.filter((id) => items.some((item) => item.id === id)) : items.slice(0, 1).map((item) => item.id));
-    }).catch(() => { if (!cancelled) setPracticeBots([]); });
-    return () => { cancelled = true; };
-  }, [scoringUrl]);
 
   const refresh = useCallback(async () => {
     setBusy(true);
@@ -217,12 +206,6 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
       setTodayMatches(matches);
       setChampion(dashboard.champion);
       setScoringState(dashboard.scoring);
-      setScoringUrl((current) => {
-        const configured = dashboard.scoring.scoringUrl || '';
-        const next = current || configured;
-        if (!current && next) saveScoringUrl(next);
-        return next;
-      });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Không tải được dữ liệu');
     } finally {
@@ -237,24 +220,51 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
   useEffect(() => {
     if (!activeJobId) return;
     let finished = false;
+    let finalizing = false;
     if (proxyJobMode) {
       const readProxyJob = async () => {
         try {
           const job = await pollProxyScore(activeJobId);
-          if (finished) return;
+          if (finished || finalizing) return;
           setActiveJobStatus(job.status === 'waiting' || job.status === 'queued' ? 'accepted' : job.status === 'running' ? 'running' : job.status);
           if (job.status === 'waiting' || job.status === 'queued' || job.status === 'running') return;
-          finished = true;
-          setActiveJobId(null);
           if (job.status === 'succeeded') {
-            setLatestScoringResult({ ok: true, match_score: job.match_score, games: job.games });
+            const score = typeof job.match_score === 'number' ? job.match_score : null;
+            if (score === null) throw new Error('Proxy trả kết quả nhưng thiếu match_score.');
+            const result = {
+              ok: true,
+              match_score: score,
+              qualification_score: score,
+              passed: score > 0,
+              match_result: score > 0 ? 'win' : score < 0 ? 'loss' : 'draw',
+              games: job.games,
+            };
+            setLatestScoringResult(result);
+            if (proxyDbJob) {
+              finalizing = true;
+              const { data: recorded, error: recordError } = await supabase.rpc('complete_proxy_scoring_job', {
+                p_job_id: activeJobId,
+                p_result: result,
+              });
+              if (recordError) {
+                throw new Error(`Không thể cập nhật trạng thái lượt nộp trong Supabase: ${recordError.message}`);
+              }
+              if (recorded !== true && recorded !== 'true') {
+                throw new Error('RPC complete_proxy_scoring_job không xác nhận cập nhật. Hãy áp dụng migration 0021_proxy_result_idempotency.sql.');
+              }
+            }
+            finished = true;
+            setActiveJobId(null);
             setMessage('Trận đấu đã được chấm xong.');
           } else {
+            finished = true;
+            setActiveJobId(null);
             setLatestScoringResult(null);
             setError(job.error || 'Cloudflare proxy không hoàn tất trận đấu.');
           }
           await refresh();
         } catch (error) {
+          finalizing = false;
           if (!finished) setError(error instanceof Error ? error.message : 'Không đọc được trạng thái chấm.');
         }
       };
@@ -305,7 +315,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
       window.clearInterval(timer);
       void supabase.removeChannel(channel);
     };
-  }, [activeJobId, proxyJobMode, refresh, user.id]);
+  }, [activeJobId, proxyDbJob, proxyJobMode, refresh, user.id]);
 
   async function upload(form: HTMLFormElement, forcePractice = false) {
     const submissionFile = file || (sourceCode.trim()
@@ -325,21 +335,31 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
       const activePracticeMode = forcePractice || practiceMode;
       const kind = activePracticeMode ? 'test' : scoringState?.phase === 'round' ? 'submission' : 'entry';
       setLatestScoringKind(kind);
-      const context = kind === 'submission' && scoringState?.round && scoringState.day
-        ? { round: scoringState.round, day: scoringState.day }
-        : null;
-      if (activePracticeMode && !selectedPracticeBots.length) throw new Error('Hãy chọn ít nhất một bot mẫu để luyện tập.');
-      const useDirectProxy = Boolean(getScoringProxyUrl()) && kind === 'submission' && todayMatches[0]?.match_id;
-      let jobId: string;
-      if (useDirectProxy) {
-        const source = await submissionFile.text();
-        const proxyJob = await submitProxyScore(source, { matchId: todayMatches[0].match_id });
-        jobId = proxyJob.job_id;
-        setProxyJobMode(true);
-      } else {
-        jobId = await createAndDispatchScoringJob(submissionFile, kind, scoringUrl, context, activePracticeMode ? selectedPracticeBots : []);
-        setProxyJobMode(false);
+      const selectedBot = SAMPLE_BOTS.find((bot) => bot.id === selectedPracticeBot);
+      if (!selectedBot) throw new Error('Hãy chọn một bot mẫu để chấm.');
+      if (!getScoringProxyUrl()) throw new Error('Chưa cấu hình Cloudflare scoring proxy.');
+      const source = await submissionFile.text();
+      const digest = await crypto.subtle.digest('SHA-256', await submissionFile.arrayBuffer());
+      const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+      const proxyJobId = crypto.randomUUID();
+      if (!activePracticeMode) {
+        const { error: createError } = await supabase.rpc('create_scoring_job', {
+          p_job_id: proxyJobId,
+          p_kind: kind,
+          p_rnd: kind === 'submission' ? scoringState?.round ?? null : null,
+          p_day: kind === 'submission' ? scoringState?.day ?? null : null,
+          p_sha256: sha256,
+          p_size_bytes: submissionFile.size,
+        });
+        if (createError) throw createError;
       }
+      const proxyJob = await submitProxyScore(source, {
+        benchmarkCode: selectedBot.source,
+        jobId: proxyJobId,
+      });
+      const jobId = proxyJob.job_id;
+      setProxyJobMode(true);
+      setProxyDbJob(!activePracticeMode);
       setActiveJobId(jobId);
       setActiveJobStatus('accepted');
       setMessage('Máy chấm đã nhận bài, đang chấm…');
@@ -590,7 +610,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
                   </div>
                   <div className="ide-top-info">
                     <p className="ide-lead">Bot được chấm ngay sau khi gửi. Giai đoạn vòng loại cho tối đa 20 lượt; hệ thống giữ điểm cao nhất.</p>
-                    {!practiceMode && scoringState?.phase === 'entry' && <p className="attempt-count">Đã dùng {Math.min(scoringState.attempts, 20)}/20 lượt · Điểm đầu vào tốt nhất: {scoringState.bestScore ?? '—'}/12</p>}
+                    {!practiceMode && scoringState?.phase === 'entry' && <p className="attempt-count">Đã dùng {Math.min(scoringState.attempts, 20)}/20 lượt · Kết quả tốt nhất: {scoringState.bestScore ?? '—'}</p>}
                     {!practiceMode && scoringState && !submissionsAllowed && <p className="form-error">{entryLimitReached ? 'Bạn đã dùng hết 20 lượt vòng loại.' : 'Hiện tại hệ thống đang đóng nhận bài.'}</p>}
                   </div>
 
@@ -658,7 +678,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
                         <strong>Chọn bot mẫu để đấu</strong>
                         <small>Luyện tập không tính vào 20 lượt vòng loại hoặc kết quả giải.</small>
                         <div className="chip-row">
-                          {practiceBots.length ? practiceBots.map((bot) => <label key={bot.id} className={`chip ${selectedPracticeBots.includes(bot.id) ? 'on' : ''}`}><input type="checkbox" checked={selectedPracticeBots.includes(bot.id)} onChange={(event) => setSelectedPracticeBots((current) => event.target.checked ? [...current, bot.id] : current.filter((id) => id !== bot.id))} />{bot.name}</label>) : <small>Chưa tải được danh sách bot mẫu. Kiểm tra URL máy chấm.</small>}
+                          {SAMPLE_BOTS.map((bot) => <label key={bot.id} className={`chip ${selectedPracticeBot === bot.id ? 'on' : ''}`}><input type="radio" name="scoring-benchmark" checked={selectedPracticeBot === bot.id} onChange={() => setSelectedPracticeBot(bot.id)} />{bot.name}</label>)}
                         </div>
                       </section>}
 
@@ -669,18 +689,13 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
                         </div>) : <small>Cặp đấu sẽ xuất hiện khi ban tổ chức mở ngày thi.</small>}
                       </details>}
 
-                      {!getScoringProxyUrl() && <label className="scoring-url-field">
-                        URL máy chấm do ban tổ chức cung cấp
-                        <input type="url" required value={scoringUrl} placeholder="https://score.tenmiencuaban.vn" aria-describedby="scoring-url-help" onChange={(event) => { setScoringUrl(event.target.value); saveScoringUrl(event.target.value); }} />
-                        <small id="scoring-url-help">URL được kiểm tra trước khi gửi. Dùng địa chỉ HTTPS của máy chấm; hệ thống lưu lựa chọn trên trình duyệt này.</small>
-                      </label>}
                     </div>
 
                     <div className="ide-actions">
                       <a className="download-link" href="/sample_bot.py" target="_blank" rel="noreferrer">
                         <ArrowDownToLine size={16} /> Xem bot mẫu
                       </a>
-                      <button className="primary" disabled={(!file && !sourceCode.trim()) || uploading || !uploadAllowed || (practiceMode && !selectedPracticeBots.length) || Boolean(activeJobId)}>
+                      <button className="primary" disabled={(!file && !sourceCode.trim()) || uploading || !uploadAllowed || Boolean(activeJobId)}>
                         {uploading ? 'Đang gửi…' : activeJobId ? 'Đang chấm…' : practiceMode ? 'Đấu bot mẫu để luyện tập' : 'Gửi bot để chấm ngay'}
                         <ArrowRight size={17} />
                       </button>
@@ -842,18 +857,18 @@ function scoreText(score: number) {
 
 function ScoringResultCard({ result, kind }: { result: Record<string, any>; kind: 'entry' | 'submission' | 'test' }) {
   const games = Array.isArray(result.games) ? result.games : [];
-  const scores = Array.isArray(result.benchmark_scores) ? result.benchmark_scores : [];
   const opponents = Array.isArray(result.opponents) ? result.opponents : [];
   const isEntry = kind === 'entry';
   const isPractice = kind === 'test';
   const title = isEntry ? 'Kết quả vòng loại' : isPractice ? 'Kết quả luyện tập' : 'Kết quả lượt thi';
+  const outcome = typeof result.match_score === 'number' ? resultLabel(result.match_score) : 'Chưa có kết quả';
   const matchRows = isPractice
     ? opponents.map((opponent: Record<string, any>, index: number) => ({
         label: opponent.name || `Bot ${index + 1}`,
         score: Number(opponent.match_score || 0),
       }))
-    : scores.map((score: number, index: number) => ({ label: `Bot đối chứng ${index + 1}`, score: Number(score) }));
-  if (!isEntry && !isPractice && typeof result.match_score === 'number') {
+    : [];
+  if (typeof result.match_score === 'number' && matchRows.length === 0) {
     matchRows.push({ label: 'Bot mẫu', score: result.match_score });
   }
 
@@ -861,14 +876,13 @@ function ScoringResultCard({ result, kind }: { result: Record<string, any>; kind
     <div className="scoring-result-heading">
       <div><p className="eyebrow">KẾT QUẢ CHẤM</p><h3>{title}</h3></div>
       <strong className={result.passed === false ? 'result-failed' : 'result-passed'}>
-        {isEntry ? (result.passed ? 'ĐẠT VÒNG LOẠI' : 'CHƯA ĐẠT') : 'ĐÃ HOÀN TẤT'}
+        {isEntry ? (result.passed ? 'ĐẠT VÒNG LOẠI' : 'CHƯA ĐẠT') : outcome.toUpperCase()}
       </strong>
     </div>
     <div className="scoring-result-grid">
-      {isEntry && <div><small>Điểm có trọng số</small><strong>{result.qualification_score ?? '—'}/12</strong></div>}
-      {isPractice && <div><small>Điểm trận luyện tập</small><strong>{result.total_match_pts ?? '—'}</strong></div>}
-      {!isEntry && !isPractice && <div><small>Điểm trận</small><strong>{result.match_pts ?? '—'}</strong></div>}
-      {!isEntry && !isPractice && <div><small>Điểm ván</small><strong>{typeof result.match_score === 'number' ? scoreText(result.match_score) : '—'}</strong></div>}
+      {isEntry && <div><small>Kết quả trận</small><strong>{outcome}</strong></div>}
+      {isPractice && <div><small>Điểm trận luyện tập</small><strong>{typeof result.match_score === 'number' ? scoreText(result.match_score) : '—'}</strong></div>}
+      {!isEntry && !isPractice && <div><small>Điểm trận</small><strong>{typeof result.match_score === 'number' ? scoreText(result.match_score) : '—'}</strong></div>}
       <div><small>Số ván đã chấm</small><strong>{games.length || matchRows.length ? `${games.length || matchRows.length} ván` : '—'}</strong></div>
       {typeof result.duration_seconds === 'number' && <div><small>Thời gian chấm</small><strong>{result.duration_seconds.toFixed(1)} giây</strong></div>}
     </div>
@@ -876,7 +890,7 @@ function ScoringResultCard({ result, kind }: { result: Record<string, any>; kind
       <strong>Thắng / thua / hòa từng đối thủ</strong>
       {matchRows.map((match, index) => <div key={`${match.label}-${index}`}><span>{match.label}</span><b className={`outcome-${match.score > 0 ? 'win' : match.score < 0 ? 'loss' : 'draw'}`}>{resultLabel(match.score)} ({scoreText(match.score)})</b></div>)}
     </div>}
-    {isEntry && <p className="scoring-result-note">Vòng loại đấu với 3 bot đối chứng, điểm tính theo trọng số 1×ván 1 + 2×ván 2 + 3×ván 3. Ngưỡng đạt hiện tại là -2/12.</p>}
+    {isEntry && <p className="scoring-result-note">Kết quả được quyết định trực tiếp từ trận đấu với bot mẫu. Thắng trận sẽ đạt vòng loại.</p>}
     {isPractice && <p className="scoring-result-note">Kết quả luyện tập không tính vào thứ hạng hoặc số lượt vòng loại.</p>}
     {!isEntry && !isPractice && result.match_result && <p className="scoring-result-note">{result.match_result}</p>}
   </section>;
