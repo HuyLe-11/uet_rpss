@@ -21,6 +21,8 @@ import {
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
+  Maximize2,
+  Minimize2,
 } from 'lucide-react';
 import { ThemeToggle, useSidebarCollapsed } from './theme';
 import Auth, { Brand } from './Auth';
@@ -175,6 +177,19 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [practiceBots, setPracticeBots] = useState<ScoringBenchmark[]>([]);
   const [selectedPracticeBots, setSelectedPracticeBots] = useState<string[]>([]);
   const [proxyJobMode, setProxyJobMode] = useState(false);
+  const [ideFullscreen, setIdeFullscreen] = useState(false);
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape' && ideFullscreen) {
+        setIdeFullscreen(false);
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [ideFullscreen]);
+
+  useEffect(() => { setIdeFullscreen(false); }, [tab]);
 
   useEffect(() => {
     if (!scoringUrl) { setPracticeBots([]); setSelectedPracticeBots([]); return; }
@@ -405,7 +420,14 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
           <ShieldCheck />
           <h3>Sẵn sàng bứt phá?</h3>
           <p>Hoàn thiện thuật toán rồi gửi bot để được chấm ngay trong giai đoạn đang mở.</p>
-          <a href="/sample_bot.py" target="_blank" rel="noreferrer">
+          <a
+            href="/rules"
+            onClick={(e) => {
+              e.preventDefault();
+              navigate('/rules');
+              setMobileNavOpen(false);
+            }}
+          >
             Xem bot mẫu <ArrowRight size={15} />
           </a>
         </div>}
@@ -500,15 +522,19 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
 
           {(tab === 'overview' || tab === 'submission') && (
             <>
-                  {tab === 'overview' && <>
+                  {tab === 'overview' && !ideFullscreen && <>
               <section className="welcome-banner">
                 <div>
                   <span className="pill">ĐẤU TRƯỜNG THUẬT TOÁN</span>
                   <h2>Code thông minh.<br />Chơi khác biệt.</h2>
                   <p>✊ Búa · 🖐 Bao · ✌️ Kéo — Ba loại quân, vô vàn chiến thuật.</p>
                   <div className="banner-actions">
-                    <button onClick={() => navigate('/submission')}>Nộp bài <ArrowRight size={16} /></button>
-                    <button className="secondary" onClick={() => navigate('/rules')}>Tài liệu và trạng thái <ArrowRight size={16} /></button>
+                    <button type="button" className="banner-btn-primary" onClick={() => navigate('/submission')}>
+                      <span>Nộp bài ngay</span> <ArrowRight size={17} />
+                    </button>
+                    <button type="button" className="banner-btn-secondary" onClick={() => navigate('/rules')}>
+                      <BookOpen size={16} /> <span>Tài liệu & trạng thái</span>
+                    </button>
                   </div>
                 </div>
                 <div className="banner-pieces" aria-hidden="true">
@@ -537,74 +563,131 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
               </div>
               </>}
 
-              <div className="content-grid">
-                <section className="panel upload-panel">
+              <div className={`content-grid ${ideFullscreen ? 'is-fullscreen' : ''}`}>
+                <section className="panel upload-panel ide-panel">
                   <div className="section-heading">
                     <div>
                       <p className="eyebrow">YOUR NEXT CHALLENGER</p>
-                  <h2>Gửi bot để chấm ngay</h2>
+                      <h2>Gửi bot để chấm ngay</h2>
                     </div>
-                    <Code2 className="muted" />
-                  </div>
-                  <p>Bot được chấm ngay sau khi gửi. Giai đoạn vòng loại cho tối đa 20 lượt; hệ thống giữ điểm cao nhất.</p>
-                  <div className="phase-controls"><button type="button" className={!practiceMode ? 'primary' : 'secondary'} onClick={() => setPracticeMode(false)}>Nộp bài thi</button><button type="button" className={practiceMode ? 'primary' : 'secondary'} onClick={() => setPracticeMode(true)}>Luyện tập</button></div>
-                  {!practiceMode && scoringState?.phase === 'entry' && <p className="attempt-count">Đã dùng {Math.min(scoringState.attempts, 20)}/20 lượt · Điểm đầu vào tốt nhất: {scoringState.bestScore ?? '—'}/12</p>}
-                  {!practiceMode && scoringState && !submissionsAllowed && <p className="form-error">{entryLimitReached ? 'Bạn đã dùng hết 20 lượt vòng loại.' : 'Hiện tại hệ thống đang đóng nhận bài.'}</p>}
-                  {practiceMode && <section className="today-opponents" aria-label="Chọn bot để luyện tập"><strong>Chọn bot mẫu để đấu</strong><p>Bài luyện tập có thể gửi ngoài khung thi, không tính vào 20 lượt vòng loại hoặc kết quả giải.</p>
-                    {practiceBots.length ? practiceBots.map((bot) => <label key={bot.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0' }}><input type="checkbox" checked={selectedPracticeBots.includes(bot.id)} onChange={(event) => setSelectedPracticeBots((current) => event.target.checked ? [...current, bot.id] : current.filter((id) => id !== bot.id))} />{bot.name}</label>) : <p>Chưa tải được danh sách bot mẫu. Kiểm tra URL máy chấm.</p>}
-                  </section>}
-                  <div className="bot-language-readonly" aria-label="Ngôn ngữ bot bắt buộc">
-                    <span>NGÔN NGỮ BẮT BUỘC</span>
-                    <select className="language-select" value="python" disabled aria-label="Ngôn ngữ lập trình">
-                      <option value="python">Python 3</option>
-                      <option value="cpp">C++ (sắp hỗ trợ)</option>
-                      <option value="java">Java (sắp hỗ trợ)</option>
-                    </select>
-                    <small>Ngôn ngữ được cố định cho cuộc thi · không thể thay đổi</small>
-                  </div>
-                  <p className="language-note">Hãy gửi file Python `.py` có hàm `choose_move(state)`.</p>
-                  {scoringState?.phase === 'round' && <section className="today-opponents" aria-label="Các đối thủ hôm nay">
-                    <strong>Đối thủ của bạn hôm nay</strong>
-                    {todayMatches.length ? todayMatches.map((match) => <div key={`${match.rnd}-${match.day}-${match.rd}`}>
-                      <span>Lượt {match.rd}</span><span>{match.opponent}</span>
-                    </div>) : <p>Cặp đấu sẽ xuất hiện khi ban tổ chức mở ngày thi.</p>}
-                  </section>}
-                  <form onSubmit={(e) => { e.preventDefault(); void upload(e.currentTarget); }}>
-                    <div className="editor-mode-tabs" role="tablist" aria-label="Cách nhập bot">
-                      <button type="button" className={editorMode === 'editor' ? 'active' : ''} onClick={() => setEditorMode('editor')}>Code trực tiếp</button>
-                      <button type="button" className={editorMode === 'file' ? 'active' : ''} onClick={() => setEditorMode('file')}>Gửi file Python</button>
+                    <div className="section-heading-actions">
+                      <div className="segmented" role="tablist" aria-label="Chế độ nộp">
+                        <button type="button" role="tab" aria-selected={!practiceMode} className={!practiceMode ? 'active' : ''} onClick={() => setPracticeMode(false)}>Nộp bài thi</button>
+                        <button type="button" role="tab" aria-selected={practiceMode} className={practiceMode ? 'active' : ''} onClick={() => setPracticeMode(true)}>Luyện tập</button>
+                      </div>
+                      <button
+                        type="button"
+                        className={`fullscreen-toggle-btn ${ideFullscreen ? 'active' : ''}`}
+                        onClick={() => setIdeFullscreen(!ideFullscreen)}
+                        title={ideFullscreen ? "Thu nhỏ (Esc)" : "Phóng to"}
+                        aria-label={ideFullscreen ? "Thu nhỏ" : "Phóng to"}
+                      >
+                        {ideFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+                        <span>{ideFullscreen ? 'Thu nhỏ' : 'Phóng to'}</span>
+                      </button>
+                      <Code2 className="muted" />
                     </div>
-                    {editorMode === 'editor' && <BotEditor value={sourceCode} onChange={setSourceCode} height="440px" />}
-                    {!getScoringProxyUrl() && <label className="scoring-url-field">
-                      URL máy chấm do ban tổ chức cung cấp
-                      <input type="url" required value={scoringUrl} placeholder="https://score.tenmiencuaban.vn" aria-describedby="scoring-url-help" onChange={(event) => { setScoringUrl(event.target.value); saveScoringUrl(event.target.value); }} />
-                      <small id="scoring-url-help">URL được kiểm tra trước khi gửi. Dùng địa chỉ HTTPS của máy chấm; hệ thống lưu lựa chọn trên trình duyệt này.</small>
-                    </label>}
-                    <label className="drop-zone">
-                      <span className="upload-icon"><Upload /></span>
-                      <strong>{file ? file.name : 'Chọn file bot Python'}</strong>
-                      <span>{file ? `${(file.size / 1024).toFixed(1)} KB` : 'Định dạng .py · Tối đa 64 KB'}</span>
-                      <input
-                        aria-label="Chọn file bot Python"
-                        type="file"
-                        accept=".py"
-                        disabled={uploading || !uploadAllowed}
-                        onChange={async (e) => {
-                          const next = e.target.files?.[0] ?? null;
-                          setFile(next);
-                          if (next) setSourceCode(await next.text());
-                        }}
-                      />
-                    </label>
-                    <button className="primary" disabled={(!file && !sourceCode.trim()) || uploading || !uploadAllowed || (practiceMode && !selectedPracticeBots.length) || Boolean(activeJobId)}>
-                      {uploading ? 'Đang gửi…' : activeJobId ? 'Đang chấm…' : practiceMode ? 'Đấu bot mẫu để luyện tập' : 'Gửi bot để chấm ngay'}
-                      <ArrowRight size={17} />
-                    </button>
-                  </form>
-                  <a className="download-link" href="/sample_bot.py" target="_blank" rel="noreferrer">
-                    <ArrowDownToLine size={16} /> Xem mã nguồn bot mẫu
-                  </a>
+                  </div>
+                  <div className="ide-top-info">
+                    <p className="ide-lead">Bot được chấm ngay sau khi gửi. Giai đoạn vòng loại cho tối đa 20 lượt; hệ thống giữ điểm cao nhất.</p>
+                    {!practiceMode && scoringState?.phase === 'entry' && <p className="attempt-count">Đã dùng {Math.min(scoringState.attempts, 20)}/20 lượt · Điểm đầu vào tốt nhất: {scoringState.bestScore ?? '—'}/12</p>}
+                    {!practiceMode && scoringState && !submissionsAllowed && <p className="form-error">{entryLimitReached ? 'Bạn đã dùng hết 20 lượt vòng loại.' : 'Hiện tại hệ thống đang đóng nhận bài.'}</p>}
+                  </div>
+
+                  {practiceMode && <>
+                    <div className="ide-toolbar">
+                      <span className="lang-badge"><Code2 size={13} /> OnlineCompiler · không tính điểm</span>
+                    </div>
+                    <Arena embedded source={sourceCode} onSourceChange={setSourceCode} />
+                  </>}
+                  {!practiceMode && <form className="ide-form" onSubmit={(e) => { e.preventDefault(); void upload(e.currentTarget); }}>
+                    {editorMode === 'editor' && (
+                      <div className="ide-editor">
+                        <div className="ide-editor-bar">
+                          <span><i /><i /><i /></span>
+                          <code>bot.py</code>
+                          <small>def choose_move(state) → (x, y, nx, ny)</small>
+                          <button
+                            type="button"
+                            className="editor-bar-fs"
+                            onClick={() => setIdeFullscreen(!ideFullscreen)}
+                            title={ideFullscreen ? "Thu nhỏ (Esc)" : "Phóng to"}
+                          >
+                            {ideFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+                          </button>
+                        </div>
+                        <BotEditor
+                          value={sourceCode}
+                          onChange={setSourceCode}
+                          height={ideFullscreen ? "max(420px, calc(100vh - 380px))" : "min(62vh, 560px)"}
+                        />
+                      </div>
+                    )}
+
+                    {editorMode === 'file' && (
+                      <label className="drop-zone">
+                        <span className="upload-icon"><Upload /></span>
+                        <strong>{file ? file.name : 'Chọn file bot Python'}</strong>
+                        <span>{file ? `${(file.size / 1024).toFixed(1)} KB` : 'Định dạng .py · Tối đa 64 KB'}</span>
+                        <input
+                          aria-label="Chọn file bot Python"
+                          type="file"
+                          accept=".py"
+                          disabled={uploading || !uploadAllowed}
+                          onChange={async (e) => {
+                            const next = e.target.files?.[0] ?? null;
+                            setFile(next);
+                            if (next) setSourceCode(await next.text());
+                          }}
+                        />
+                      </label>
+                    )}
+
+                    {/* Các nút option đã chuyển xuống bên dưới */}
+                    <div className="ide-bottom-options">
+                      <div className="ide-toolbar">
+                        
+                        <div className="segmented" role="tablist" aria-label="Cách nhập bot">
+                          <button type="button" role="tab" aria-selected={editorMode === 'editor'} className={editorMode === 'editor' ? 'active' : ''} onClick={() => { setEditorMode('editor'); setFile(null); }}>Code trực tiếp</button>
+                          <button type="button" role="tab" aria-selected={editorMode === 'file'} className={editorMode === 'file' ? 'active' : ''} onClick={() => setEditorMode('file')}>Gửi file .py</button>
+                        </div>
+                        <span className="lang-badge" title="Ngôn ngữ được cố định cho cuộc thi"><Code2 size={13} /> Python 3 · cố định</span>
+                      </div>
+
+                      {practiceMode && <section className="ide-collapse practice-picker" aria-label="Chọn bot để luyện tập">
+                        <strong>Chọn bot mẫu để đấu</strong>
+                        <small>Luyện tập không tính vào 20 lượt vòng loại hoặc kết quả giải.</small>
+                        <div className="chip-row">
+                          {practiceBots.length ? practiceBots.map((bot) => <label key={bot.id} className={`chip ${selectedPracticeBots.includes(bot.id) ? 'on' : ''}`}><input type="checkbox" checked={selectedPracticeBots.includes(bot.id)} onChange={(event) => setSelectedPracticeBots((current) => event.target.checked ? [...current, bot.id] : current.filter((id) => id !== bot.id))} />{bot.name}</label>) : <small>Chưa tải được danh sách bot mẫu. Kiểm tra URL máy chấm.</small>}
+                        </div>
+                      </section>}
+
+                      {scoringState?.phase === 'round' && <details className="ide-collapse" aria-label="Các đối thủ hôm nay">
+                        <summary>Đối thủ của bạn hôm nay ({todayMatches.length})</summary>
+                        {todayMatches.length ? todayMatches.map((match) => <div className="opponent-line" key={`${match.rnd}-${match.day}-${match.rd}`}>
+                          <span>Lượt {match.rd}</span><strong>{match.opponent}</strong>
+                        </div>) : <small>Cặp đấu sẽ xuất hiện khi ban tổ chức mở ngày thi.</small>}
+                      </details>}
+
+                      {!getScoringProxyUrl() && <label className="scoring-url-field">
+                        URL máy chấm do ban tổ chức cung cấp
+                        <input type="url" required value={scoringUrl} placeholder="https://score.tenmiencuaban.vn" aria-describedby="scoring-url-help" onChange={(event) => { setScoringUrl(event.target.value); saveScoringUrl(event.target.value); }} />
+                        <small id="scoring-url-help">URL được kiểm tra trước khi gửi. Dùng địa chỉ HTTPS của máy chấm; hệ thống lưu lựa chọn trên trình duyệt này.</small>
+                      </label>}
+                    </div>
+
+                    <div className="ide-actions">
+                      <a className="download-link" href="/sample_bot.py" target="_blank" rel="noreferrer">
+                        <ArrowDownToLine size={16} /> Xem bot mẫu
+                      </a>
+                      <button className="primary" disabled={(!file && !sourceCode.trim()) || uploading || !uploadAllowed || (practiceMode && !selectedPracticeBots.length) || Boolean(activeJobId)}>
+                        {uploading ? 'Đang gửi…' : activeJobId ? 'Đang chấm…' : practiceMode ? 'Đấu bot mẫu để luyện tập' : 'Gửi bot để chấm ngay'}
+                        <ArrowRight size={17} />
+                      </button>
+                    </div>
+                  </form>}
                 </section>
+
 
                 <section className="panel match-history-panel">
                   <div className="section-heading">
@@ -625,7 +708,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
                   </button>
                 </section>
               </div>
-              {(tab === 'submission' || tab === 'overview') && <SubmissionHistory user={user} replays={replays}/>}
+              {(tab === 'submission' || tab === 'overview') && !ideFullscreen && <SubmissionHistory user={user} replays={replays}/>}
             </>
           )}
 
@@ -694,12 +777,29 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
           )}
 
           {tab === 'rules' && (
+            <div className="docs-layout">
+            <aside className="panel status-panel" aria-label="Trạng thái">
+              <p className="eyebrow">TRẠNG THÁI</p>
+              <h2>Trạng thái của bạn</h2>
+              <div className="status-list">
+                {[
+                  [UserRound, 'Trạng thái', status ? statusLabel[status.status] ?? status.status : '—'],
+                  [Swords, 'Giai đoạn', scoringState ? ({ entry: 'Vòng loại', round: 'Thi đấu', done: 'Đã kết thúc' }[scoringState.phase]) : '—'],
+                  [ChartNoAxesColumnIncreasing, 'Điểm tốt nhất', scoringState?.bestScore ?? status?.entry ?? '—'],
+                  [Trophy, 'Bảng thi đấu', status?.group ?? 'Chưa chia bảng'],
+                ].map(([Icon, label, value], i) => {
+                  const I = Icon as typeof Trophy;
+                  return <div className="stat-card" key={i}><span className={`stat-icon color-${i}`}><I size={20} /></span><span><small>{String(label)}</small><strong>{String(value)}</strong></span></div>;
+                })}
+              </div>
+              {scoringState?.phase === 'entry' && <p className="attempt-count">Đã dùng {Math.min(scoringState.attempts, 20)}/20 lượt vòng loại</p>}
+              <div className="journey-step"><span>01</span><div><h3>Tài khoản</h3><p>Tài khoản đã được xác thực.</p></div><Check className="green" size={18} /></div>
+              <div className="journey-step"><span>02</span><div><h3>Gửi bot và nhận điểm</h3><p>Vòng loại tối đa 20 lượt; kết quả tốt nhất được giữ lại.</p></div>{scoringState && scoringState.phase !== 'entry' && <Check className="green" size={18} />}</div>
+              <div className="journey-step"><span>03</span><div><h3>Thi đấu và leo hạng</h3><p>Theo dõi lịch sử, điểm số và replay của các trận đã hoàn tất.</p></div>{scoringState?.phase === 'done' && <Check className="green" size={18} />}</div>
+            </aside>
             <section className="panel rules">
               <p className="eyebrow">PLAY SMART. PLAY FAIR.</p>
-              <h2>Tài liệu và trạng thái</h2>
-              <div className="journey-step"><span>01</span><div><h3>Tài khoản</h3><p>Tài khoản đã được xác thực.</p></div><Check className="green" size={18} /></div>
-              <div className="journey-step"><span>02</span><div><h3>Gửi bot và nhận điểm</h3><p>Vòng loại tối đa 20 lượt; kết quả tốt nhất được giữ lại.</p></div></div>
-              <div className="journey-step"><span>03</span><div><h3>Thi đấu và leo hạng</h3><p>Theo dõi lịch sử, điểm số và replay của các trận đã hoàn tất.</p></div></div>
+              <h2>Tài liệu</h2>
               <h3>Luật RPS trên bàn cờ</h3>
               <div className="rule-pieces">
                 <span>✊ Búa thắng Kéo</span>
@@ -720,6 +820,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
                 <Code2 size={16} /> Đọc chương trình bot mẫu
               </a>
             </section>
+            </div>
           )}
 
           <footer className="dashboard-footer">
