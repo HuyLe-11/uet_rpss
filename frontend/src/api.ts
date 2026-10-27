@@ -205,15 +205,52 @@ export async function getSubmissionHistory(userId: string): Promise<SubmissionHi
 }
 
 export async function getReplayMetadata(round?: number, day?: number): Promise<Replays> {
-  const { data, error } = await supabase.rpc('get_my_replay_matches');
-  if (error) throw new Error(error.message);
+  const [{ data, error }, { data: authData, error: authError }] = await Promise.all([
+    supabase.rpc('get_my_replay_matches'),
+    supabase.auth.getUser(),
+  ]);
   const rows = (data || []) as Array<{ replay_id: string; replay_kind: 'match' | 'job'; rnd: number; day: number; rd: number; player_a: string; player_b: string; score_a: number; storage_path: string }>;
-  const dates = [...new Map(rows.map(row => [`${row.rnd},${row.day}`, { round: row.rnd, day: row.day }])).values()]
+  const allMatches: ReplayMatch[] = rows.map(row => ({ id: row.replay_id, kind: row.replay_kind, storagePath: row.storage_path, round: row.rnd, day: row.day, rd: row.rd, a: row.player_a, b: row.player_b, s: row.score_a, games: [] }));
+
+  // A successful qualification/practice result already contains its games.
+  // Use that owner-readable result as a fallback when replay object upload or
+  // metadata registration failed, so a scored run is still replayable.
+  if (!authError && authData.user) {
+    const { data: jobs, error: jobsError } = await supabase.from('scoring_jobs')
+      .select('id,kind,finished_at,result')
+      .eq('user_id', authData.user.id)
+      .eq('status', 'succeeded')
+      .in('kind', ['entry', 'test'])
+      .order('finished_at', { ascending: true });
+    if (!jobsError) {
+      let jobIndex = 0;
+      for (const job of jobs || []) {
+        const games = Array.isArray(job.result?.games) ? job.result.games as ReplayGame[] : [];
+        if (!games.length) continue;
+        const storedReplay = allMatches.find(match => match.kind === 'job' && String(match.id) === String(job.id));
+        if (storedReplay) {
+          storedReplay.games = games;
+          continue;
+        }
+        jobIndex += 1;
+        allMatches.push({
+          id: job.id, kind: 'job', round: 0, day: 0, rd: jobIndex,
+          a: authData.user.user_metadata?.username || authData.user.email || 'Bạn',
+          b: job.kind === 'test' ? 'Bot luyện tập' : 'Bot mẫu',
+          s: Number(job.result?.match_score ?? job.result?.qualification_score ?? 0), games,
+        });
+      }
+    } else if (error && !rows.length) {
+      throw new Error(`${error.message}; ${jobsError.message}`);
+    }
+  } else if (error) {
+    throw new Error(error.message);
+  }
+  const dates = [...new Map(allMatches.map(row => [`${row.round},${row.day}`, { round: row.round!, day: row.day! }])).values()]
     .sort((a, b) => b.round - a.round || b.day - a.day);
   const selected = round !== undefined && day !== undefined
     ? { round, day }
     : dates.find(date => date.round === 0 && date.day === 0) || dates[0] || null;
-  const allMatches = rows.map(row => ({ id: row.replay_id, kind: row.replay_kind, storagePath: row.storage_path, round: row.rnd, day: row.day, rd: row.rd, a: row.player_a, b: row.player_b, s: row.score_a, games: [] }));
   const matches = selected ? allMatches.filter(row => row.round === selected.round && row.day === selected.day) : [];
   return { available: dates, round: selected?.round ?? null, day: selected?.day ?? null, matches, allMatches };
 }
