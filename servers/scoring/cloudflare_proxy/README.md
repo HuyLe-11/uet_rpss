@@ -1,10 +1,9 @@
 # Cloudflare scoring proxy
 
-The web-facing scoring module authenticates contestants and keeps Supabase
-tournament state. When `OTT_SCORING_PROXY_URL` and
-`OTT_SCORING_PROXY_TOKEN` are configured on that module, every qualification,
-practice, and official BO2 is executed by this Worker through OnlineCompiler.
-The browser never receives the Worker service token or the OnlineCompiler key.
+The browser sends scoring requests directly to this Worker. The Worker checks
+the contestant's Supabase JWT, executes bots through OnlineCompiler, and writes
+official scores and replay files to Supabase. Service-role and OnlineCompiler
+keys stay in Worker secrets; the browser never receives them.
 
 The JavaScript entrypoint is [`worker.js`](./worker.js).
 
@@ -35,6 +34,8 @@ For local development, create `.dev.vars` (do not commit it):
 
 ```text
 ONLINECOMPILER_API_KEY=your-api-key
+SUPABASE_ANON_KEY=your-project-anon-key
+SUPABASE_SERVICE_ROLE_KEY=your-project-service-role-key
 ```
 
 ## Browser request contract
@@ -46,7 +47,8 @@ ONLINECOMPILER_API_KEY=your-api-key
 ```
 
 The request must include the contestant's `Authorization: Bearer <Supabase JWT>`.
-Configure `SUPABASE_URL` and `SUPABASE_ANON_KEY` as Worker variables/secrets.
+Configure `SUPABASE_URL` and `SUPABASE_ANON_KEY` for the same Supabase project
+used by the frontend, and set `SUPABASE_SERVICE_ROLE_KEY` as a Worker secret.
 The Worker validates the JWT through Supabase before accepting a job. The
 response is initially `202` with a `job_id`; the browser polls
 `GET /v1/score/{job_id}` with the same JWT.
@@ -58,6 +60,14 @@ instead. The Worker records the result through `proxy_complete_match`; the
 official match UI polls Supabase rather than repeatedly polling this Worker.
 After all matches in a Swiss round finish, the Worker schedules the next round
 after a one-minute cooldown and asks Supabase to create its pairings.
+
+The Worker compresses replay JSON and stores it in the private `replays`
+Storage bucket. It upserts `replay_objects` metadata and marks completed matches
+with `has_replay = true`. Official match replays combine both BO2 attempts and
+are shown only after the day is graded and its publication time has arrived.
+Apply migrations `0004_replay_storage_and_web_api.sql` and
+`0007_submission_history_and_replay_visibility.sql` for the bucket, metadata
+table, and read policies.
 
 Official match jobs are keyed by `match_id` inside the Durable Object. If both
 contestants submit at nearly the same time, their requests share one queue job

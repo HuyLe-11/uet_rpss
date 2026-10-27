@@ -445,7 +445,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
       if (!activePracticeMode && kind === 'submission' && !matchId) {
         throw new Error('Chọn trận cần nộp trong danh sách trận hôm nay.');
       }
-      if (!activePracticeMode && kind !== 'submission') {
+      if (kind !== 'submission') {
         const { error: createError } = await supabase.rpc('create_scoring_job', {
           p_job_id: proxyJobId,
           p_kind: kind,
@@ -463,7 +463,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
       });
       const jobId = proxyJob.job_id;
       setProxyJobMode(true);
-      setProxyDbJob(!activePracticeMode && kind !== 'submission');
+      setProxyDbJob(kind !== 'submission');
       setActiveMatchId(!activePracticeMode && kind === 'submission' ? matchId! : null);
       setActiveMatchAttempt(!activePracticeMode && kind === 'submission'
         ? todayMatches.find((match) => match.match_id === matchId)?.attempts_completed ?? 0

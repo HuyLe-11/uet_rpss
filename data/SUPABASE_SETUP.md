@@ -55,7 +55,7 @@ const { data: s } = await sb.rpc('get_group_leaderboard', { p_rnd: 1 });        
 const { data: m } = await sb.rpc('get_group_matches', { p_rnd: 1, p_day: 3 });  // trận trong ngày
 const { data: me } = await sb.from('round_members').select('*');                // chỉ thấy dòng của mình
 ```
-Frontend hiện gọi RPC/Storage với anon key + JWT; submit được gửi trực tiếp tới Supabase và scoring module. Các thao tác cần service-role chỉ chạy từ `admin_cli_service` trên máy quản trị.
+Frontend gọi Supabase RPC/Storage bằng anon/publishable key + JWT, còn mọi lượt chấm đi qua Cloudflare Worker. Worker giữ OnlineCompiler key và Supabase service-role key; browser không gọi scoring module cũ.
 
 ## 8. Checklist an toàn
 - [ ] `data/.env` không commit (đã nằm trong `.gitignore`).
@@ -65,10 +65,10 @@ Frontend hiện gọi RPC/Storage với anon key + JWT; submit được gửi tr
 
 ## 9. Biến môi trường khi deploy demo
 
-- **Vercel** (Root Directory `frontend`, Build `npm run build`, Output `dist`): đặt `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_SCORING_MODULE_URL` tùy chọn. Không còn `VITE_API_URL`.
+- **Vercel** (Root Directory `frontend`, Build `npm run build`, Output `dist`): đặt `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` (hoặc publishable key) và `VITE_SCORING_PROXY_URL=https://<worker-domain>`.
 - **Máy quản trị**: đặt `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` trong môi trường local rồi chạy `admin_cli_service` khi cần tạo/import admin. Không đưa service-role key vào frontend.
-- **Máy chấm tại chỗ**: đặt `OTT_SCORING_CORS_ORIGINS=https://<domain-vercel>`, chạy module trên `8110`, giữ Judge0 riêng ở `2358`, và cấu hình Tunnel hostname HTTPS trỏ tới `8110`. Không đặt secret máy chấm vào Vercel.
+- **Cloudflare Worker**: đặt `SUPABASE_URL` và secrets `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `ONLINECOMPILER_API_KEY`. Frontend chỉ gọi Worker qua HTTPS; không cần tunnel tới scoring module.
 - Trong Supabase Auth → URL Configuration, thêm domain Vercel vào Site URL/Redirect URLs.
-- URL máy chấm do người dùng nhập và lưu vào trình duyệt, hoặc URL admin lưu ở Supabase, phải truy cập được từ trình duyệt thí sinh. `localhost` trên máy ban tổ chức không dùng được với người xem từ xa.
+- Áp dụng các migration replay `0004` và `0007` cùng migration proxy `0017` đến `0031`. Replay match được công bố sau khi ngày thi đã chấm và đến `publish_after`.
 
-Các vòng 1–4 online vận hành qua Supabase RPC và scoring module. Vòng 5 offline chưa được triển khai; website cần Internet.
+Các vòng thi online vận hành qua Supabase RPC và Cloudflare Worker. Vòng 5 offline chưa được triển khai; website cần Internet.

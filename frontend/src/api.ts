@@ -8,20 +8,7 @@ export const supabase = createClient(
   import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || SUPABASE_ANON_KEY,
 );
 
-const DEFAULT_SCORING_MODULE_URL = (import.meta.env.VITE_SCORING_MODULE_URL || '').replace(/\/$/, '');
 const DEFAULT_SCORING_PROXY_URL = (import.meta.env.VITE_SCORING_PROXY_URL || '').replace(/\/$/, '');
-const SCORING_URL_STORAGE_KEY = 'ott.scoring_module_url';
-
-export function getSavedScoringUrl(): string {
-  if (typeof localStorage === 'undefined') return DEFAULT_SCORING_MODULE_URL;
-  return localStorage.getItem(SCORING_URL_STORAGE_KEY) || DEFAULT_SCORING_MODULE_URL;
-}
-
-export function saveScoringUrl(value: string) {
-  if (typeof localStorage === 'undefined') return;
-  if (value.trim()) localStorage.setItem(SCORING_URL_STORAGE_KEY, value.trim().replace(/\/+$/, ''));
-  else localStorage.removeItem(SCORING_URL_STORAGE_KEY);
-}
 
 export function getScoringProxyUrl(): string {
   return DEFAULT_SCORING_PROXY_URL;
@@ -89,115 +76,6 @@ export async function pollProxyScore(jobId: string): Promise<ProxyScoreJob> {
   return payload as ProxyScoreJob;
 }
 
-function normalizeScoringUrl(value: string): string {
-  const url = new URL(value.trim());
-  const localHttp = url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname);
-  if (url.protocol !== 'https:' && !localHttp) throw new Error('URL máy chấm phải dùng HTTPS (HTTP chỉ dùng cho localhost).');
-  if (url.username || url.password || url.search || url.hash) throw new Error('URL máy chấm không được chứa tài khoản, query hoặc fragment.');
-  return url.toString().replace(/\/+$/, '');
-}
-
-export async function probeScoringServer(value: string, timeoutMs = 5000): Promise<{ ok: boolean; service?: string }> {
-  let base: string;
-  try {
-    base = normalizeScoringUrl(value);
-  } catch {
-    throw new Error('Hãy nhập URL đầy đủ, ví dụ https://score.tenmiencuaban.vn.');
-  }
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${base}/v1/health`, { signal: controller.signal, cache: 'no-store' });
-    if (!response.ok) throw new Error(`Máy chấm trả HTTP ${response.status}.`);
-    const payload = await response.json().catch(() => null);
-    if (!payload?.ok) throw new Error('URL không trỏ tới API máy chấm hợp lệ.');
-    return payload;
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') throw new Error('Máy chấm không phản hồi trong 5 giây.');
-    if (error instanceof TypeError) throw new Error('Không thể kết nối. Kiểm tra hostname, HTTPS và CORS trên máy chấm.');
-    throw error;
-  } finally {
-    window.clearTimeout(timer);
-  }
-}
-
-export async function getScoringAdminMetrics(value: string) {
-  const base = normalizeScoringUrl(value);
-  const token = await getAccessToken();
-  if (!token) throw new Error('Phiên đăng nhập đã hết hạn.');
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), 8000);
-  try {
-    const response = await fetch(`${base}/v1/admin/metrics`, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: controller.signal,
-      cache: 'no-store',
-    });
-    const payload = await response.json().catch(() => null);
-    if (!response.ok) throw new Error(payload?.detail || `Không lấy được metrics (HTTP ${response.status}).`);
-    return payload;
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') throw new Error('Máy chấm không trả metrics trong 8 giây.');
-    if (error instanceof TypeError) throw new Error('Không kết nối được metrics; kiểm tra CORS và URL tunnel.');
-    throw error;
-  } finally {
-    window.clearTimeout(timer);
-  }
-}
-
-export async function postScoringAdmin<T = Record<string, unknown>>(value: string, path: string, body?: unknown): Promise<T> {
-  const base = normalizeScoringUrl(value);
-  const token = await getAccessToken();
-  if (!token) throw new Error('Phiên đăng nhập đã hết hạn.');
-  const response = await fetch(`${base}${path}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    cache: 'no-store',
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(payload?.detail || `Thao tác thất bại (HTTP ${response.status}).`);
-  return payload as T;
-}
-
-export type ScoringBenchmark = { id: string; name: string };
-
-export async function getScoringBenchmarks(value: string): Promise<ScoringBenchmark[]> {
-  const base = normalizeScoringUrl(value);
-  let response: Response;
-  try {
-    response = await fetch(`${base}/v1/benchmarks`, { cache: 'no-store' });
-  } catch (error) {
-    if (error instanceof TypeError) {
-      throw new Error('Không phân giải được URL máy chấm; hãy cập nhật tunnel trong mục Quản trị máy chấm.');
-    }
-    throw error;
-  }
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(payload?.detail || `Không tải được bot mẫu (HTTP ${response.status}).`);
-  return Array.isArray(payload?.benchmarks) ? payload.benchmarks : [];
-}
-
-export async function uploadScoringBenchmark(value: string, file: File): Promise<ScoringBenchmark> {
-  const base = normalizeScoringUrl(value);
-  const token = await getAccessToken();
-  if (!token) throw new Error('Phiên đăng nhập đã hết hạn.');
-  const form = new FormData();
-  form.append('file', file);
-  const response = await fetch(`${base}/v1/admin/benchmarks`, {
-    method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form, cache: 'no-store',
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(payload?.detail || `Không tải được bot mẫu (HTTP ${response.status}).`);
-  return payload.benchmark as ScoringBenchmark;
-}
-
-export class ApiError extends Error {
-  constructor(message: string, public status: number) {
-    super(message);
-  }
-}
-
 export async function getAccessToken(): Promise<string | null> {
   const { data: { session } } = await supabase.auth.getSession();
   return session?.access_token || null;
@@ -211,87 +89,6 @@ export interface ScoringJob {
   error_message?: string | null;
 }
 
-export async function createAndDispatchScoringJob(
-  file: File,
-  kind: 'entry' | 'submission' | 'test' = 'entry',
-  scoringModuleUrl = getSavedScoringUrl(),
-  context: { round: number; day: number } | null = null,
-  benchmarkIds: string[] = [],
-): Promise<string> {
-  if (!scoringModuleUrl.trim()) throw new Error('Hãy nhập URL HTTPS của máy chấm.');
-  if (kind === 'submission' && (!context || context.round < 1 || context.day < 1)) {
-    throw new Error('Chưa có vòng/ngày thi hợp lệ để nộp bài.');
-  }
-  const baseUrl = normalizeScoringUrl(scoringModuleUrl);
-  const token = await getAccessToken();
-  if (!token) throw new Error('Phiên đăng nhập đã hết hạn');
-  await probeScoringServer(baseUrl);
-  const bytes = await file.arrayBuffer();
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  const sha256 = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
-  const id = crypto.randomUUID();
-
-  const { error: createError } = await supabase.rpc('create_scoring_job', {
-    p_job_id: id,
-    p_kind: kind,
-    p_rnd: kind === 'submission' ? context?.round ?? null : null,
-    p_day: kind === 'submission' ? context?.day ?? null : null,
-    p_sha256: sha256,
-    p_size_bytes: file.size,
-  });
-  if (createError) throw new Error(scoringErrorMessage(createError.message));
-
-  // Persist the job before the module checks Supabase. Dispatching these in
-  // parallel can race PostgREST replica visibility and produce a false 409.
-  const body = new FormData();
-  body.append('file', file);
-  if (kind === 'test') body.append('benchmark_ids', benchmarkIds.join(','));
-  const dispatchController = new AbortController();
-  const dispatchTimer = window.setTimeout(() => dispatchController.abort(), 10_000);
-  const acceptedAfterRace = async () => {
-    const { data: currentJob } = await supabase
-      .from('scoring_jobs')
-      .select('status')
-      .eq('id', id)
-      .maybeSingle();
-    return Boolean(currentJob && ['accepted', 'running', 'succeeded'].includes(currentJob.status));
-  };
-  try {
-    const response = await fetch(`${baseUrl}/v1/jobs/${id}`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body,
-      signal: dispatchController.signal,
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new ApiError(payload.detail || 'Máy chấm không nhận bài', response.status);
-    return id;
-  } catch (dispatchError) {
-    if (await acceptedAfterRace()) return id;
-    await supabase.rpc('fail_scoring_dispatch', { p_job_id: id });
-    if (await acceptedAfterRace()) return id;
-    if (dispatchError instanceof Error && dispatchError.name === 'AbortError') {
-      throw new Error('Máy chấm chưa xác nhận nhận bài trong 10 giây. Hãy kiểm tra kết nối rồi thử lại.');
-    }
-    throw dispatchError;
-  } finally {
-    window.clearTimeout(dispatchTimer);
-  }
-}
-
-function scoringErrorMessage(message: string): string {
-  const known: Record<string, string> = {
-    entry_closed: 'Giai đoạn vòng loại đã đóng. Hãy tải lại trang hoặc liên hệ ban tổ chức.',
-    submission_context_stale: 'Thông tin cuộc thi chưa được đồng bộ. Vui lòng liên hệ ban tổ chức.',
-    submissions_closed: 'Ban tổ chức đang tạm đóng nhận bài.',
-    qualification_attempt_limit: 'Bạn đã dùng hết 20 lượt nộp ở giai đoạn vòng loại.',
-    already_submitted_today: 'Bạn đã gửi bot cho ngày thi này rồi.',
-    account_not_allowed: 'Tài khoản hiện không được phép tham gia cuộc thi.',
-  };
-  const key = Object.keys(known).find((candidate) => message?.includes(candidate));
-  return key ? known[key] : message || 'Không thể tạo yêu cầu chấm bài.';
-}
-
 export interface ScoringState {
   phase: 'entry' | 'round' | 'done';
   accepting: boolean;
@@ -299,7 +96,6 @@ export interface ScoringState {
   bestScore: number | null;
   round?: number | null;
   day?: number | null;
-  scoringUrl?: string | null;
 }
 
 export interface User {

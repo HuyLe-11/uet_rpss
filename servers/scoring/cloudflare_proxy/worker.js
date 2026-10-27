@@ -430,6 +430,17 @@ function publicJob(job) {
   return result;
 }
 
+function orientReplayGame(game, scoringUserIsPlayerA) {
+  if (scoringUserIsPlayerA) return game;
+  return {
+    ...game,
+    players: Array.isArray(game.players)
+      ? game.players.map((side) => side === "a" ? "b" : "a")
+      : game.players,
+    result: Number.isFinite(game.result) ? -game.result : game.result,
+  };
+}
+
 class ScoringQueue {
   constructor(state, env) {
     this.state = state;
@@ -485,6 +496,79 @@ class ScoringQueue {
     return jsonResponse({ queued, running, queue_size: queue.length, max_queue_size: MAX_QUEUE_SIZE });
   }
 
+  async scheduleReplayRetry() {
+    const dueAt = Date.now() + 30_000;
+    const current = await this.state.storage.getAlarm();
+    if (current === null || dueAt < current) await this.state.storage.setAlarm(dueAt);
+  }
+
+  async recordMatchReplayAttempt(job, games) {
+    if (!Array.isArray(games) || !games.length || !job.scoring_user_id) return;
+    const key = `replay:match:${job.match_id}`;
+    const record = await this.state.storage.get(key) || { attempts: {} };
+    record.attempts[String(job.attempt_no || 1)] = {
+      scoring_user_id: job.scoring_user_id,
+      games,
+    };
+    await this.state.storage.put(key, record);
+    await this.scheduleReplayRetry();
+  }
+
+  async persistMatchReplay(matchId) {
+    const key = `replay:match:${matchId}`;
+    const record = await this.state.storage.get(key);
+    if (!record) return false;
+    try {
+      const rows = await supabaseServiceSelect(
+        this.env,
+        `matches?id=eq.${matchId}&select=state,player_a`,
+      );
+      const match = Array.isArray(rows) ? rows[0] : null;
+      if (!match || !["completed", "forfeit"].includes(match.state)) return false;
+      const games = Object.entries(record.attempts || {})
+        .sort(([left], [right]) => Number(left) - Number(right))
+        .flatMap(([, attempt]) => {
+          const userIsA = attempt.scoring_user_id === match.player_a;
+          return (attempt.games || []).map((game) => orientReplayGame(game, userIsA));
+        });
+      if (games.length) {
+        await storeReplayObject(this.env, { matchId, games });
+      }
+      await this.state.storage.delete(key);
+      console.log(JSON.stringify({ event: "match_replay_saved", match_id: matchId, games: games.length }));
+      return true;
+    } catch (error) {
+      console.log(`match_replay_save_failed:${matchId}:${String(error).slice(0, 250)}`);
+      await this.scheduleReplayRetry();
+      return false;
+    }
+  }
+
+  async retryPendingReplays() {
+    const matches = await this.state.storage.list({ prefix: "replay:match:" });
+    for (const key of matches.keys()) {
+      await this.persistMatchReplay(Number(key.slice("replay:match:".length)));
+    }
+    const jobs = await this.state.storage.list({ prefix: "replay:job:" });
+    for (const [key, games] of jobs) {
+      try {
+        const jobId = key.slice("replay:job:".length);
+        const rows = await supabaseServiceSelect(
+          this.env,
+          `scoring_jobs?id=eq.${encodeURIComponent(jobId)}&select=id`,
+        );
+        if (Array.isArray(rows) && rows.length) {
+          await storeReplayObject(this.env, { jobId, games });
+        }
+        await this.state.storage.delete(key);
+        console.log(JSON.stringify({ event: "job_replay_saved", job_id: jobId, tracked: Boolean(rows?.length) }));
+      } catch (error) {
+        console.log(`job_replay_save_failed:${key}:${String(error).slice(0, 250)}`);
+        await this.scheduleReplayRetry();
+      }
+    }
+  }
+
   async clearQueue() {
     const entries = await this.state.storage.list({ prefix: "job:" });
     let deleted = 0;
@@ -521,6 +605,7 @@ class ScoringQueue {
             existing.benchmark_code = body.benchmark_code;
             existing.auth_token = body.auth_token;
             existing.scoring_user_id = body.user_id;
+            existing.attempt_no = body.attempt_no || existing.attempt_no || 1;
             const queue = await this.state.storage.get("queue") || [];
             if (!queue.includes(existing.job_id)) {
               if (queue.length >= MAX_QUEUE_SIZE) {
@@ -549,6 +634,7 @@ class ScoringQueue {
       benchmark_code: body.benchmark_code,
       user_id: body.user_id,
       scoring_user_id: body.user_id,
+      attempt_no: body.attempt_no || 1,
       user_ids: [body.user_id, body.opponent_id].filter(Boolean),
       auth_token: body.auth_token,
       match_id: Number.isInteger(body.match_id) ? body.match_id : null,
@@ -584,6 +670,7 @@ class ScoringQueue {
       match_id: body.match_id,
       contestant_code: body.contestant_code || null,
       sha256: body.sha256 || null,
+      attempt_no: body.attempt_no || 1,
       auth_token: body.auth_token,
       created_at: new Date().toISOString(),
       attempts: 0,
@@ -613,6 +700,7 @@ class ScoringQueue {
       }
       if (match?.ready) {
         job.status = "queued";
+        job.attempt_no = match.attempt_no || job.attempt_no || 1;
         job.benchmark_code = match.opponent_code;
         if (match.opponent_id && !job.user_ids?.includes(match.opponent_id)) {
           job.user_ids = [...(job.user_ids || []), match.opponent_id];
@@ -643,6 +731,7 @@ class ScoringQueue {
   async alarm() {
     await this.recoverInterruptedJobs();
     await this.processDueRoundAdvances();
+    await this.retryPendingReplays();
     const waiting = [...(await this.state.storage.list({ prefix: "job:" })).values()]
       .filter((job) => job.status === "waiting");
     let nextWaitingAlarm = null;
@@ -653,6 +742,9 @@ class ScoringQueue {
         nextWaitingAlarm = nextWaitingAlarm === null ? timeoutAt : Math.min(nextWaitingAlarm, timeoutAt);
       }
     }
+    // A submission-window timeout can finalize a match after the first replay
+    // retry pass, so check match replay records again after resolving waiters.
+    await this.retryPendingReplays();
     await this.dispatch();
     const queueAfterDispatch = await this.state.storage.get("queue") || [];
     await this.scheduleNextTournamentWake(nextWaitingAlarm, queueAfterDispatch.length > 0 || this.running.size > 0);
@@ -739,7 +831,10 @@ class ScoringQueue {
       p_error_code: errorCode,
       p_error_message: String(message || "scoring did not complete").slice(0, 500),
     });
-    if (completion?.finalized) await this.scheduleRoundAdvance(job.match_id);
+    if (completion?.finalized) {
+      await this.persistMatchReplay(job.match_id);
+      await this.scheduleRoundAdvance(job.match_id);
+    }
     else await this.state.storage.delete(`match:${job.match_id}`);
     job.status = "failed";
     job.error_code = errorCode;
@@ -846,13 +941,34 @@ class ScoringQueue {
       }
       const result = parseCompilerResult(payload);
       if (job.match_id) {
+        await this.recordMatchReplayAttempt(job, result.games);
         const completion = await supabaseServiceRpc(this.env, "proxy_complete_match", {
           p_match_id: job.match_id,
           p_score_a: result.match_score,
           p_scoring_user_id: job.scoring_user_id || job.user_id,
         });
-        if (completion?.finalized) await this.scheduleRoundAdvance(job.match_id);
+        if (completion?.finalized) {
+          await this.persistMatchReplay(job.match_id);
+          await this.scheduleRoundAdvance(job.match_id);
+        }
         else await this.state.storage.delete(`match:${job.match_id}`);
+      } else if (job.job_id && result.games?.length) {
+        const replayKey = `replay:job:${job.job_id}`;
+        await this.state.storage.put(replayKey, result.games);
+        try {
+          const rows = await supabaseServiceSelect(
+            this.env,
+            `scoring_jobs?id=eq.${encodeURIComponent(job.job_id)}&select=id`,
+          );
+          if (Array.isArray(rows) && rows.length) {
+            await storeReplayObject(this.env, { jobId: job.job_id, games: result.games });
+          }
+          await this.state.storage.delete(replayKey);
+          console.log(JSON.stringify({ event: "job_replay_saved", job_id: job.job_id, tracked: Boolean(rows?.length) }));
+        } catch (replayError) {
+          console.log(`job_replay_save_failed:${job.job_id}:${String(replayError).slice(0, 250)}`);
+          await this.scheduleReplayRetry();
+        }
       }
       await this.finish(job, result);
     } catch (error) {
@@ -981,6 +1097,7 @@ export default {
 
       let opponentCode = benchmark;
       let opponentUserId = null;
+      let matchAttemptNo = 1;
       const requestedJobId = typeof body?.job_id === "string" && body.job_id.trim()
         ? body.job_id.trim()
         : null;
@@ -1002,6 +1119,7 @@ export default {
         if (match?.cooldown) {
           return jsonResponse({ detail: "Lượt BO2 kế tiếp chưa mở; thời gian nghỉ giữa hai lượt là 1 phút." }, 409);
         }
+        matchAttemptNo = match?.attempt_no || 1;
         opponentUserId = match?.opponent_id || null;
         if (!match?.ready) {
           const queue = env.SCORING_QUEUE.idFromName("global");
@@ -1010,7 +1128,7 @@ export default {
             headers: { "content-type": "application/json", "x-user-id": user.id },
             body: JSON.stringify({
               job_id: requestedJobId || crypto.randomUUID(), user_id: user.id, match_id: matchId,
-              opponent_id: match?.opponent_id,
+              opponent_id: match?.opponent_id, attempt_no: matchAttemptNo,
               auth_token: user.token, contestant_code: contestant, sha256,
             }),
           });
@@ -1028,6 +1146,7 @@ export default {
           benchmark_code: opponentCode,
           user_id: user.id,
           opponent_id: opponentUserId,
+          attempt_no: matchAttemptNo,
           auth_token: user.token,
           match_id: matchId ?? null,
         }),
