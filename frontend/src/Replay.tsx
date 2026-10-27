@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ChevronLeft, ChevronRight, Pause, Play } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Pause, Play, RotateCcw } from 'lucide-react';
 import { loadMatchReplay, type ReplayGame, type Replays } from './api';
 
 function RockIcon() {
@@ -36,7 +36,7 @@ function PieceIcon({ type }: { type: number }) {
   return <ScissorsIcon />;
 }
 
-export default function Replay({ data, onDay, initialMatchId }: { data: Replays; onDay: (round: number, day: number) => void; initialMatchId?: string | number | null }) {
+export default function Replay({ data, onDay, onRefresh, initialMatchId }: { data: Replays; onDay: (round: number, day: number) => void; onRefresh?: () => void; initialMatchId?: string | number | null }) {
   const [matchIndex, setMatchIndex] = useState(0);
   const [gameIndex, setGameIndex] = useState(0);
   const [step, setStep] = useState(0);
@@ -64,16 +64,21 @@ export default function Replay({ data, onDay, initialMatchId }: { data: Replays;
     setPlaying(false);
     setLoadError('');
     if (!match?.storagePath) {
+      setGames(match?.games || []);
       setLoading(false);
       return;
     }
     setLoading(true);
     void loadMatchReplay(match.storagePath)
       .then(result => { if (!cancelled) setGames(result); })
-      .catch(error => { if (!cancelled) setLoadError(error instanceof Error ? error.message : 'Không tải được replay'); })
+      .catch(error => {
+        if (cancelled) return;
+        if (match.games?.length) setGames(match.games);
+        else setLoadError(error instanceof Error ? error.message : 'Không tải được replay');
+      })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [match?.storagePath]);
+  }, [match?.id, match?.storagePath, match?.games]);
 
   const game = games[gameIndex];
   const total = game?.moves.length ?? 0;
@@ -100,7 +105,7 @@ export default function Replay({ data, onDay, initialMatchId }: { data: Replays;
 
   return (
     <section className="panel">
-      <div className="section-heading"><div><p className="eyebrow">MATCH REPLAY</p><h2>Nhìn lại từng nước đi</h2></div><span className="badge">BO2</span></div>
+      <div className="section-heading"><div><p className="eyebrow">MATCH REPLAY</p><h2>Nhìn lại từng nước đi</h2></div>{onRefresh && <button type="button" className="secondary" onClick={onRefresh}><RotateCcw size={15}/>Tải lại replay</button>}</div>
       <div className="replay-selects">
         <label>Ngày thi<select value={data.round && data.day ? `${data.round},${data.day}` : ''} onChange={event => { const [round, day] = event.target.value.split(',').map(Number); onDay(round, day); }} disabled={!data.available.length}>
           {!data.available.length && <option>Chưa có ngày thi</option>}
@@ -116,7 +121,7 @@ export default function Replay({ data, onDay, initialMatchId }: { data: Replays;
       </div>
       {loading ? <div className="empty-state"><Play/><h3>Đang tải replay…</h3><p>Đang lấy diễn biến trận từ kho lưu trữ.</p></div>
         : loadError ? <div className="empty-state"><Play/><h3>Chưa tải được replay</h3><p>{loadError}</p></div>
-          : !game ? <div className="empty-state"><Play/><h3>Trận đấu sẽ xuất hiện tại đây</h3><p>{match ? 'Trận này không có dữ liệu phát lại.' : 'Sau khi ban tổ chức chấm, bạn có thể xem lại các trận trong bảng của mình.'}</p></div>
+          : !game ? <div className="empty-state"><Play/><h3>{initialMatchId != null && !match ? 'Replay trận này chưa được công bố' : 'Trận đấu sẽ xuất hiện tại đây'}</h3><p>{match ? 'Replay chưa có ván đấu hợp lệ. Hãy tải lại danh sách hoặc chọn trận khác.' : 'Replay chỉ xuất hiện sau khi ngày thi được công bố. Hãy tải lại danh sách sau.'}</p>{onRefresh && <button type="button" className="secondary" onClick={onRefresh}><RotateCcw size={15}/>Tải lại danh sách</button>}</div>
             : <>
               <div className="replay-names">
                 <span className="replay-player player-0">🔵 {botName(game.players[0])}</span>

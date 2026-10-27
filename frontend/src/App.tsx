@@ -838,6 +838,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
                   <div className="match-history-list">
                     {todayMatches.length ? todayMatches.map((match) => {
                       const replay = replays.allMatches.find(item => item.kind === 'match' && String(item.id) === String(match.match_id));
+                      const matchDate = { round: replay?.round ?? match.rnd, day: replay?.day ?? match.day };
                       return <div className="match-history-row" key={match.match_id}>
                       <span>Lượt {match.rd}</span><strong>{match.opponent}</strong>
                       <small>Bạn: {submissionStateLabel(match.my_submission_state)} · Đối thủ: {submissionStateLabel(match.opponent_submission_state)}</small>
@@ -845,7 +846,13 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
                       {match.state === 'pending' && match.submission_deadline && (match.my_submission_state !== 'submitted' || match.opponent_submission_state !== 'submitted') && <small>{countdownLabel(match.submission_deadline, clockNow, match.my_submission_state === 'submitted' ? 'Đối thủ' : 'Bạn')}</small>}
                       {match.state === 'pending' && match.my_submission_state === 'submitted' && match.opponent_submission_state === 'submitted' && <small>Hai bên đã nộp · đang chờ chấm</small>}
                       <small>ID: {match.match_id}</small><b>{match.state}</b>
-                      {replay && <button type="button" className="secondary match-replay-button" onClick={() => { setSelectedReplayId(replay.id ?? null); navigate('/replay'); }}>Xem lại trận đấu <ArrowRight size={14}/></button>}
+                      <button type="button" className="secondary match-replay-button" onClick={() => {
+                        const availableMatch = replay ?? replays.allMatches.find(item => item.kind === 'match' && item.round === matchDate.round && item.day === matchDate.day);
+                        const dateMatches = replays.allMatches.filter(item => item.round === matchDate.round && item.day === matchDate.day);
+                        setReplays({ ...replays, round: matchDate.round, day: matchDate.day, matches: dateMatches });
+                        setSelectedReplayId(availableMatch?.id ?? match.match_id);
+                        navigate('/replay');
+                      }}>Xem lại trận đấu <ArrowRight size={14}/></button>
                     </div>}) : <p className="muted">Chưa có cặp đấu trong ngày hiện tại.</p>}
                   </div>
                   {latestScoringResult && <div className="history-score-card"><span>Điểm gần nhất</span><strong>{latestScoringResult.match_score ?? latestScoringResult.qualification_score ?? '—'}</strong></div>}
@@ -915,6 +922,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
             <Replay
               data={replays}
               initialMatchId={selectedReplayId}
+              onRefresh={() => { void getReplayMetadata().then(setReplays).catch(e => setError(e.message)); }}
               onDay={(r, d) => {
                 void getReplayMetadata(r, d)
                   .then(setReplays)
