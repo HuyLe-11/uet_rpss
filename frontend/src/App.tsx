@@ -173,6 +173,10 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [scoringState, setScoringState] = useState<ScoringState | null>(null);
   const [champion, setChampion] = useState<string | null>(null);
   const [todayMatches, setTodayMatches] = useState<TodayMatch[]>([]);
+  const [clockNow, setClockNow] = useState(Date.now());
+  const [activeMatchId, setActiveMatchId] = useState<number | null>(null);
+  const [activeMatchAttempt, setActiveMatchAttempt] = useState<number | null>(null);
+  const [selectedMatchId, setSelectedMatchId] = useState<number | null>(null);
   const [practiceMode, setPracticeMode] = useState(false);
   const [selectedPracticeBot, setSelectedPracticeBot] = useState(SAMPLE_BOTS[0]?.id || '');
   const [proxyJobMode, setProxyJobMode] = useState(false);
@@ -218,10 +222,72 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
   }, [refresh, user.role]);
 
   useEffect(() => {
+    if (user.role === 'admin' || scoringState?.phase !== 'round') return;
+    const clock = window.setInterval(() => setClockNow(Date.now()), 1000);
+    let active = true;
+    const syncMatchStatus = async () => {
+      try {
+        const matches = await getMyTodayMatches();
+        if (active) setTodayMatches(matches);
+      } catch { /* Keep the last known match status during transient network errors. */ }
+    };
+    const timer = activeMatchId === null ? window.setInterval(() => void syncMatchStatus(), 5_000) : null;
+    return () => { active = false; if (timer !== null) window.clearInterval(timer); window.clearInterval(clock); };
+  }, [scoringState?.phase, scoringState?.round, scoringState?.day, user.role, activeMatchId]);
+
+  useEffect(() => {
+    if (selectedMatchId === null) return;
+    const selected = todayMatches.find((match) => match.match_id === selectedMatchId);
+    if (selected && selected.state !== 'pending') setSelectedMatchId(null);
+  }, [selectedMatchId, todayMatches]);
+
+  useEffect(() => {
     if (!activeJobId) return;
     let finished = false;
     let finalizing = false;
     if (proxyJobMode) {
+      if (activeMatchId !== null) {
+        const readMatchResult = async () => {
+          try {
+            const matches = await getMyTodayMatches();
+            if (finished) return;
+            setTodayMatches(matches);
+            const match = matches.find((item) => item.match_id === activeMatchId);
+            if (!match) return;
+            if (match.state === 'pending' && activeMatchAttempt !== null && match.attempts_completed > activeMatchAttempt) {
+              finished = true;
+              setActiveJobId(null);
+              setActiveMatchId(null);
+              setActiveMatchAttempt(null);
+              setLatestScoringResult({ ok: true, match_score: match.my_match_score, games_count: match.attempts_completed * 2, opponent_name: match.opponent });
+              setMessage(`Đã chấm ${match.attempts_completed}/2 lượt BO2. Có thể nộp lượt tiếp theo sau 1 phút.`);
+              await refresh();
+              return;
+            }
+            if (!['completed', 'forfeit'].includes(match.state)) return;
+            const score = match.my_match_score ?? 0;
+            finished = true;
+            setActiveJobId(null);
+            setActiveMatchId(null);
+            setActiveMatchAttempt(null);
+            if (match.state === 'completed') {
+              setLatestScoringResult({ ok: true, match_score: score, match_result: score > 0 ? 'win' : score < 0 ? 'loss' : 'draw', games_count: 4, opponent_name: match.opponent });
+              setMessage(match.scoring_error
+                ? `Máy chấm gặp lỗi ở một lượt (lượt lỗi tính hòa 0); tổng điểm sau 4 ván: ${score > 0 ? '+' : ''}${score}. Mã lỗi: ${match.scoring_error}`
+                : `Trận đã chấm xong: ${score > 0 ? '+' : ''}${score} điểm.`);
+            } else {
+              setLatestScoringResult({ ok: true, match_score: match.my_match_score, points: match.my_match_points });
+              setMessage(`Trận đã chốt do hết hạn nộp: ${match.my_match_points > 0 ? '+' : ''}${match.my_match_points} điểm.`);
+            }
+            await refresh();
+          } catch (error) {
+            if (!finished) setError(error instanceof Error ? error.message : 'Không đọc được trạng thái trận.');
+          }
+        };
+        void readMatchResult();
+        const timer = window.setInterval(() => void readMatchResult(), 5000);
+        return () => { finished = true; window.clearInterval(timer); };
+      }
       const readProxyJob = async () => {
         try {
           const job = await pollProxyScore(activeJobId);
@@ -315,7 +381,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
       window.clearInterval(timer);
       void supabase.removeChannel(channel);
     };
-  }, [activeJobId, proxyDbJob, proxyJobMode, refresh, user.id]);
+  }, [activeJobId, activeMatchId, activeMatchAttempt, proxyDbJob, proxyJobMode, refresh, user.id]);
 
   async function upload(form: HTMLFormElement, forcePractice = false) {
     const submissionFile = file || (sourceCode.trim()
@@ -336,33 +402,43 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
       const kind = activePracticeMode ? 'test' : scoringState?.phase === 'round' ? 'submission' : 'entry';
       setLatestScoringKind(kind);
       const selectedBot = SAMPLE_BOTS.find((bot) => bot.id === selectedPracticeBot);
-      if (!selectedBot) throw new Error('Hãy chọn một bot mẫu để chấm.');
+      if (kind !== 'submission' && !selectedBot) throw new Error('Hãy chọn một bot mẫu để chấm.');
       if (!getScoringProxyUrl()) throw new Error('Chưa cấu hình Cloudflare scoring proxy.');
       const source = await submissionFile.text();
       const digest = await crypto.subtle.digest('SHA-256', await submissionFile.arrayBuffer());
       const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
       const proxyJobId = crypto.randomUUID();
-      if (!activePracticeMode) {
+      const matchId = todayMatches.find((match) => match.match_id === selectedMatchId && match.state === 'pending')?.match_id
+        ?? todayMatches.find((match) => match.state === 'pending' && match.my_submission_state === 'waiting')?.match_id;
+      if (!activePracticeMode && kind === 'submission' && !matchId) {
+        throw new Error('Chọn trận cần nộp trong danh sách trận hôm nay.');
+      }
+      if (!activePracticeMode && kind !== 'submission') {
         const { error: createError } = await supabase.rpc('create_scoring_job', {
           p_job_id: proxyJobId,
           p_kind: kind,
-          p_rnd: kind === 'submission' ? scoringState?.round ?? null : null,
-          p_day: kind === 'submission' ? scoringState?.day ?? null : null,
+          p_rnd: null,
+          p_day: null,
           p_sha256: sha256,
           p_size_bytes: submissionFile.size,
         });
         if (createError) throw createError;
       }
       const proxyJob = await submitProxyScore(source, {
-        benchmarkCode: selectedBot.source,
+        matchId: !activePracticeMode && kind === 'submission' ? matchId : undefined,
+        benchmarkCode: kind === 'submission' && !activePracticeMode ? undefined : selectedBot!.source,
         jobId: proxyJobId,
       });
       const jobId = proxyJob.job_id;
       setProxyJobMode(true);
-      setProxyDbJob(!activePracticeMode);
+      setProxyDbJob(!activePracticeMode && kind !== 'submission');
+      setActiveMatchId(!activePracticeMode && kind === 'submission' ? matchId! : null);
+      setActiveMatchAttempt(!activePracticeMode && kind === 'submission'
+        ? todayMatches.find((match) => match.match_id === matchId)?.attempts_completed ?? 0
+        : null);
       setActiveJobId(jobId);
       setActiveJobStatus('accepted');
-      setMessage('Máy chấm đã nhận bài, đang chấm…');
+      setMessage(kind === 'submission' ? 'Đã gửi bot cho trận đã chọn; đang chờ đối thủ hoặc kết quả chấm…' : 'Máy chấm đã nhận bài, đang chấm…');
 
       form.reset();
       setFile(null);
@@ -400,7 +476,10 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
   const entryLimitReached = scoringState?.phase === 'entry' && scoringState.attempts >= 20;
   // The server checks submission availability again when accepting a job.
   const submissionsAllowed = !scoringState || Boolean(scoringState.accepting && scoringState.phase !== 'done' && !entryLimitReached);
-  const uploadAllowed = practiceMode || submissionsAllowed;
+  const selectedMatch = todayMatches.find((match) => match.match_id === selectedMatchId && match.state === 'pending')
+    || todayMatches.find((match) => match.state === 'pending' && ['waiting', 'submitting'].includes(match.my_submission_state));
+  const selectedMatchAlreadySubmitted = Boolean(selectedMatch && selectedMatch.my_submission_state !== 'waiting');
+  const uploadAllowed = practiceMode || (submissionsAllowed && (scoringState?.phase !== 'round' || Boolean(selectedMatch && selectedMatch.can_submit && !selectedMatchAlreadySubmitted)));
 
   return (
     <div className="dashboard">
@@ -609,9 +688,15 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
                     </div>
                   </div>
                   <div className="ide-top-info">
-                    <p className="ide-lead">Bot được chấm ngay sau khi gửi. Giai đoạn vòng loại cho tối đa 20 lượt; hệ thống giữ điểm cao nhất.</p>
+                    <p className="ide-lead">{scoringState?.phase === 'round' ? 'Mỗi trận bắt đầu chấm khi cả hai bên đã nộp. Người nộp trước cho đối thủ tối đa 90 giây để phản hồi.' : 'Bot được chấm ngay sau khi gửi. Giai đoạn vòng loại cho tối đa 20 lượt; hệ thống giữ điểm cao nhất.'}</p>
                     {!practiceMode && scoringState?.phase === 'entry' && <p className="attempt-count">Đã dùng {Math.min(scoringState.attempts, 20)}/20 lượt · Kết quả tốt nhất: {scoringState.bestScore ?? '—'}</p>}
                     {!practiceMode && scoringState && !submissionsAllowed && <p className="form-error">{entryLimitReached ? 'Bạn đã dùng hết 20 lượt vòng loại.' : 'Hiện tại hệ thống đang đóng nhận bài.'}</p>}
+                    {!practiceMode && scoringState?.phase === 'round' && !selectedMatch && <p className="attempt-count">
+                      Chưa có trận đang chờ nộp bài.
+                    </p>}
+                    {!practiceMode && scoringState?.phase === 'round' && selectedMatch && !selectedMatch.can_submit && selectedMatch.attempts_completed > 0 && <p className="attempt-count">
+                      Đã chấm {selectedMatch.attempts_completed}/2 lượt BO2; lượt tiếp theo mở sau 1 phút.
+                    </p>}
                   </div>
 
                   {practiceMode && <>
@@ -686,6 +771,11 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
                         <summary>Đối thủ của bạn hôm nay ({todayMatches.length})</summary>
                         {todayMatches.length ? todayMatches.map((match) => <div className="opponent-line" key={`${match.rnd}-${match.day}-${match.rd}`}>
                           <span>Lượt {match.rd}</span><strong>{match.opponent}</strong>
+                          <small>Bạn: {submissionStateLabel(match.my_submission_state)} · Đối thủ: {submissionStateLabel(match.opponent_submission_state)}</small>
+                          <small>Lượt BO2 đã chấm: {match.attempts_completed}/2</small>
+                          {match.state === 'pending' && match.submission_deadline && (match.my_submission_state !== 'submitted' || match.opponent_submission_state !== 'submitted') && <small>{countdownLabel(match.submission_deadline, clockNow, match.my_submission_state === 'submitted' ? 'Đối thủ' : 'Bạn')}</small>}
+                          {match.state === 'pending' && match.my_submission_state === 'submitted' && match.opponent_submission_state === 'submitted' && <small>Hai bên đã nộp · đang chờ chấm</small>}
+                          <button type="button" className="secondary" disabled={match.state !== 'pending' || !match.can_submit || match.my_submission_state !== 'waiting'} onClick={() => setSelectedMatchId(match.match_id)}>{selectedMatchId === match.match_id ? 'Đang chọn' : 'Chọn trận'}</button>
                         </div>) : <small>Cặp đấu sẽ xuất hiện khi ban tổ chức mở ngày thi.</small>}
                       </details>}
 
@@ -696,7 +786,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
                         <ArrowDownToLine size={16} /> Xem bot mẫu
                       </a>
                       <button className="primary" disabled={(!file && !sourceCode.trim()) || uploading || !uploadAllowed || Boolean(activeJobId)}>
-                        {uploading ? 'Đang gửi…' : activeJobId ? 'Đang chấm…' : practiceMode ? 'Đấu bot mẫu để luyện tập' : 'Gửi bot để chấm ngay'}
+                        {uploading ? 'Đang gửi…' : activeJobId ? 'Đang chấm…' : practiceMode ? 'Đấu bot mẫu để luyện tập' : scoringState?.phase === 'round' ? `Nộp bot lượt ${selectedMatch?.rd ?? '—'}` : 'Gửi bot để chấm ngay'}
                         <ArrowRight size={17} />
                       </button>
                     </div>
@@ -714,7 +804,12 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
                   </div>
                   <div className="match-history-list">
                     {todayMatches.length ? todayMatches.map((match) => <div className="match-history-row" key={match.match_id}>
-                      <span>Lượt {match.rd}</span><strong>{match.opponent}</strong><small>ID: {match.match_id}</small><b>{match.state}</b>
+                      <span>Lượt {match.rd}</span><strong>{match.opponent}</strong>
+                      <small>Bạn: {submissionStateLabel(match.my_submission_state)} · Đối thủ: {submissionStateLabel(match.opponent_submission_state)}</small>
+                      <small>Lượt BO2 đã chấm: {match.attempts_completed}/2</small>
+                      {match.state === 'pending' && match.submission_deadline && (match.my_submission_state !== 'submitted' || match.opponent_submission_state !== 'submitted') && <small>{countdownLabel(match.submission_deadline, clockNow, match.my_submission_state === 'submitted' ? 'Đối thủ' : 'Bạn')}</small>}
+                      {match.state === 'pending' && match.my_submission_state === 'submitted' && match.opponent_submission_state === 'submitted' && <small>Hai bên đã nộp · đang chờ chấm</small>}
+                      <small>ID: {match.match_id}</small><b>{match.state}</b>
                     </div>) : <p className="muted">Chưa có cặp đấu trong ngày hiện tại.</p>}
                   </div>
                   {latestScoringResult && <div className="history-score-card"><span>Điểm gần nhất</span><strong>{latestScoringResult.match_score ?? latestScoringResult.qualification_score ?? '—'}</strong></div>}
@@ -855,6 +950,20 @@ function scoreText(score: number) {
   return `${score > 0 ? '+' : ''}${score}`;
 }
 
+function submissionStateLabel(state: TodayMatch['my_submission_state'] | TodayMatch['opponent_submission_state'] | undefined): string {
+  if (state === 'resolved') return 'Đã chốt';
+  if (state === 'submitted') return 'Đã nộp';
+  if (state === 'late') return 'Nộp trễ';
+  if (state === 'submitting') return 'Đang nộp';
+  return 'Chưa nộp';
+}
+
+function countdownLabel(deadline: string, now: number, whoMustSubmit: 'Bạn' | 'Đối thủ'): string {
+  const seconds = Math.max(0, Math.ceil((new Date(deadline).getTime() - now) / 1000));
+  if (seconds === 0) return 'Đã hết hạn · đang chốt trận';
+  return `${whoMustSubmit} cần nộp trong ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
 function ScoringResultCard({ result, kind }: { result: Record<string, any>; kind: 'entry' | 'submission' | 'test' }) {
   const games = Array.isArray(result.games) ? result.games : [];
   const opponents = Array.isArray(result.opponents) ? result.opponents : [];
@@ -869,8 +978,9 @@ function ScoringResultCard({ result, kind }: { result: Record<string, any>; kind
       }))
     : [];
   if (typeof result.match_score === 'number' && matchRows.length === 0) {
-    matchRows.push({ label: 'Bot mẫu', score: result.match_score });
+    matchRows.push({ label: kind === 'submission' ? result.opponent_name || 'Đối thủ' : 'Bot mẫu', score: result.match_score });
   }
+  const gameCount = Number.isInteger(result.games_count) ? result.games_count : (games.length || matchRows.length);
 
   return <section className="scoring-result-card" role="status" aria-live="polite">
     <div className="scoring-result-heading">
@@ -883,7 +993,7 @@ function ScoringResultCard({ result, kind }: { result: Record<string, any>; kind
       {isEntry && <div><small>Kết quả trận</small><strong>{outcome}</strong></div>}
       {isPractice && <div><small>Điểm trận luyện tập</small><strong>{typeof result.match_score === 'number' ? scoreText(result.match_score) : '—'}</strong></div>}
       {!isEntry && !isPractice && <div><small>Điểm trận</small><strong>{typeof result.match_score === 'number' ? scoreText(result.match_score) : '—'}</strong></div>}
-      <div><small>Số ván đã chấm</small><strong>{games.length || matchRows.length ? `${games.length || matchRows.length} ván` : '—'}</strong></div>
+      <div><small>Số ván đã chấm</small><strong>{gameCount ? `${gameCount} ván` : '—'}</strong></div>
       {typeof result.duration_seconds === 'number' && <div><small>Thời gian chấm</small><strong>{result.duration_seconds.toFixed(1)} giây</strong></div>}
     </div>
     {matchRows.length > 0 && <div className="scoring-result-matches">

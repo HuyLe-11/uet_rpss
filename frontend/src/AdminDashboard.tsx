@@ -71,6 +71,7 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
   const [replayCleanupBusy, setReplayCleanupBusy] = useState(false);
   const [eliminatedContestants, setEliminatedContestants] = useState<Array<Record<string, any>>>([]);
   const [contestantActionId, setContestantActionId] = useState<string | null>(null);
+  const [clearSubmissionsId, setClearSubmissionsId] = useState<string | null>(null);
 
 
   const refresh = useCallback(async (showSpinner = true) => {
@@ -167,11 +168,13 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
           : path === 'open-day' ? 'admin_open_tournament_day'
             : 'admin_resume_tournament_day';
       const rpcArgs = path === 'open-day' ? { p_rnd: (body as any)?.round, p_day: (body as any)?.day } : undefined;
-      const { error: rpcError } = rpcArgs
+      const { data, error: rpcError } = rpcArgs
         ? await supabase.rpc(rpcName, rpcArgs)
         : await supabase.rpc(rpcName);
       if (rpcError) throw rpcError;
-      setMessage(successText);
+      setMessage(path === 'close-entry'
+        ? `Đã chốt đầu vào và chia ${data?.qualified ?? ''} thí sinh vào ${data?.groups ?? 40} bảng.`
+        : successText);
       await refresh(false);
     } catch (err: any) { setError(err?.message || 'Không thực hiện được thao tác điều hành.'); }
     finally { setTournamentActionBusy(false); }
@@ -214,6 +217,20 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
           ? 'Chưa reset được vì đang có trận đấu chạy. Chờ trận hoàn tất rồi thử lại.'
           : detail || 'Không reset được giải đấu.');
     } finally { setResetBusy(false); }
+  }
+
+  async function clearContestantSubmissions(userId: string, username: string) {
+    if (!window.confirm(`Xóa toàn bộ bài nộp và lượt vòng loại của ${username}? Điểm vòng loại sẽ được xóa và thí sinh phải nộp lại. Thao tác không thể hoàn tác.`)) return;
+    setClearSubmissionsId(userId); setError(''); setMessage('');
+    try {
+      const { data, error: rpcError } = await supabase.rpc('admin_clear_contestant_submissions', { p_user_id: userId });
+      if (rpcError) throw rpcError;
+      let cleanup = { deleted: 0, complete: false };
+      try { cleanup = await drainReplayCleanupQueue(); } catch { /* Cleanup is queued and can be retried. */ }
+      setMessage(`Đã xóa ${data?.deleted_jobs ?? 0} lượt vòng loại, ${data?.deleted_submissions ?? 0} bài nộp và đặt lại điểm của ${username}.${cleanup.complete ? ` Đã xóa ${cleanup.deleted} replay.` : ' Replay còn lại được giữ trong hàng đợi dọn dẹp.'}`);
+      await refresh(false);
+    } catch (err: any) { setError(err?.message || 'Không xóa được dữ liệu bài nộp.'); }
+    finally { setClearSubmissionsId(null); }
   }
 
   async function retryReplayCleanup() {
@@ -314,7 +331,7 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
         </div>
         <div className="phase-controls">
           {phase !== 'done' && <button className={accepting ? 'secondary' : 'primary'} disabled={tournamentActionBusy} onClick={() => void setSubmissionGate(!accepting)}>{accepting ? 'Đóng cổng nhận bài' : 'Mở cổng nhận bài'}</button>}
-          {phase === 'entry' && <button className="primary" disabled={tournamentActionBusy} onClick={() => void runTournamentAction('close-entry', undefined, 'Đã chốt đầu vào và chia thí sinh vào 40 bảng.')}>{tournamentActionBusy ? 'Đang xử lý…' : 'Chốt đầu vào & chia bảng'}</button>}
+          {phase === 'entry' && <button className="primary" disabled={tournamentActionBusy} onClick={() => void runTournamentAction('close-entry')}>{tournamentActionBusy ? 'Đang xử lý…' : 'Chốt đầu vào & chia bảng'}</button>}
           {phase === 'round' && round <= 4 && snapshot?.days.find((item) => item.rnd === round && item.day === day)?.state === 'open' && <button className="primary" disabled={tournamentActionBusy} onClick={() => void runTournamentAction('close-day', undefined, 'Đã chốt ngày.')}>{tournamentActionBusy ? 'Đang xử lý…' : 'Chốt ngày'}</button>}
           {phase === 'round' && round <= 4 && snapshot?.days.find((item) => item.rnd === round && item.day === day)?.state === 'graded' && day < 7 && <button className="primary" disabled={tournamentActionBusy} onClick={() => void runTournamentAction('open-day', { round, day: day + 1 }, `Đã mở ngày ${day + 1} của vòng ${round}.`)}>Mở ngày {day + 1}</button>}
           <button className="secondary" disabled={resetBusy || tournamentActionBusy} onClick={() => void resetTournament()}><RotateCcw size={16} />{resetBusy ? 'Đang reset…' : 'Reset giải về ngày 0'}</button>
@@ -323,7 +340,8 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
         <p className="muted server-note">Reset giữ tài khoản, cấu hình giải và URL máy chấm; xóa dữ liệu thi/replay, gỡ trạng thái loại, đặt mọi thí sinh về đầu vào ngày 0. Nếu lượt chấm hoặc trận còn đang chạy, reset sẽ bị từ chối để tránh xóa dữ liệu giữa chừng; chờ hoàn tất rồi thử lại. Không thể hoàn tác.</p>
         {phase === 'round' && round === 5 && <p className="muted server-note">Vòng thứ năm thi offline chưa được cài đặt. Hệ thống này chỉ vận hành các vòng online.</p>}
       </section>
-      <EntrantsTable entrants={snapshot?.entrants || []} />
+      <EntrantsTable entrants={snapshot?.entrants || []} phase={phase} busyId={clearSubmissionsId}
+        onClear={(id, username) => void clearContestantSubmissions(id, username)} />
       <section className="panel">
         <SectionHeading icon={ShieldCheck} eyebrow="TÀI KHOẢN QUẢN TRỊ" title="Quản lý bằng công cụ dòng lệnh an toàn" />
         <p>Việc tạo và import tài khoản admin được thực hiện bằng công cụ dòng lệnh trên máy tin cậy, không qua trình duyệt. Dùng <code>admin_cli_service</code> với khóa quản trị chỉ trên môi trường quản trị.</p>
@@ -414,11 +432,11 @@ function SectionHeading({ icon: Icon, eyebrow, title }: { icon: typeof Activity;
   return <div className="section-heading"><div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2></div><Icon size={19} className="muted" /></div>;
 }
 
-function EntrantsTable({ entrants }: { entrants: Array<Record<string, any>> }) {
+function EntrantsTable({ entrants, phase, busyId, onClear }: { entrants: Array<Record<string, any>>; phase: 'entry' | 'round' | 'done'; busyId: string | null; onClear: (id: string, username: string) => void }) {
   return <section className="panel"><SectionHeading icon={Users} eyebrow="DANH SÁCH THÍ SINH" title={`Theo dõi ${entrants.length} tài khoản`} />
     {!entrants.length ? <div className="empty-state"><Users /><h3>Chưa có thí sinh</h3><p>Tài khoản được tạo sẽ xuất hiện tại đây.</p></div> :
-      <div className="table-scroll"><table><thead><tr><th>Thí sinh</th><th>Trạng thái</th><th>Điểm vòng loại</th><th>Bảng</th><th>Lượt vòng loại</th><th>Bài ngày này</th><th>Hoạt động cuối</th></tr></thead><tbody>
-        {entrants.map((item) => <tr key={item.id}><td>{item.username}</td><td>{item.status}</td><td>{item.entry_score ?? '—'}</td><td>{item.grp ?? '—'}</td><td>{item.entry_attempts}/20</td><td>{item.submitted ? 'Đã nộp' : 'Chưa nộp'}</td><td>{formatTime(item.last_activity)}</td></tr>)}
+      <div className="table-scroll"><table><thead><tr><th>Thí sinh</th><th>Trạng thái</th><th>Điểm vòng loại</th><th>Bảng</th><th>Lượt vòng loại</th><th>Bài ngày này</th><th>Hoạt động cuối</th><th>Thao tác</th></tr></thead><tbody>
+        {entrants.map((item) => <tr key={item.id}><td>{item.username}</td><td>{item.status}</td><td>{item.entry_score ?? '—'}</td><td>{item.grp ?? '—'}</td><td>{item.entry_attempts}/20</td><td>{item.submitted ? 'Đã nộp' : 'Chưa nộp'}</td><td>{formatTime(item.last_activity)}</td><td><button className="secondary" disabled={phase !== 'entry' || busyId !== null} title={phase !== 'entry' ? 'Chỉ khả dụng trong giai đoạn vòng loại' : undefined} onClick={() => onClear(item.id, item.username)}>{busyId === item.id ? 'Đang xóa…' : 'Xóa bài & reset lượt'}</button></td></tr>)}
       </tbody></table></div>}
   </section>;
 }

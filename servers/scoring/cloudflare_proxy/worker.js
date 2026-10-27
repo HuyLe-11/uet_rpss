@@ -13,6 +13,11 @@ const UPSTREAM_CONCURRENCY = 2;
 // 30 submissions/minute while using both execution slots.
 const UPSTREAM_INTERVAL_MS = 4200;
 const MAX_RETRIES = 5;
+const MATCH_MAX_RETRIES = 2;
+const UPSTREAM_REQUEST_TIMEOUT_MS = 120_000;
+const MATCH_SCORING_MAX_MS = 8 * 60_000;
+const MATCH_SUBMISSION_WINDOW_MS = 90_000;
+const MATCH_TIMEOUT_GRACE_MS = 5_000;
 const ONLINECOMPILER_URL = "https://api.onlinecompiler.io/api/run-code-sync/";
 
 async function authenticate(request, env) {
@@ -39,6 +44,23 @@ async function supabaseRpc(env, token, name, body) {
     headers: {
       apikey: env.SUPABASE_ANON_KEY,
       authorization: token,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(`supabase_${name}_${response.status}:${payload?.message || payload?.hint || "request failed"}`);
+  return payload;
+}
+
+async function supabaseServiceRpc(env, name, body) {
+  const key = env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!key) throw new Error("supabase_service_role_not_configured");
+  const response = await fetch(`${env.SUPABASE_URL.replace(/\/$/, "")}/rest/v1/rpc/${name}`, {
+    method: "POST",
+    headers: {
+      apikey: key,
+      authorization: `Bearer ${key}`,
       "content-type": "application/json",
     },
     body: JSON.stringify(body),
@@ -328,6 +350,12 @@ class ScoringQueue {
 
   async fetch(request) {
     const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/schedule-advance") {
+      const body = await request.json();
+      if (!Number.isInteger(body?.match_id)) return jsonResponse({ detail: "Invalid match_id" }, 400);
+      await this.scheduleRoundAdvance(body.match_id);
+      return jsonResponse({ ok: true });
+    }
     if (request.method === "POST" && url.pathname === "/enqueue-waiting") {
       return this.enqueueWaiting(await request.json());
     }
@@ -397,8 +425,13 @@ class ScoringQueue {
           existing.user_ids = [...userIds];
           if (existing.status === "waiting") {
             existing.status = "queued";
+            // A waiting job was created from the first contestant's POST.
+            // Execute the second contestant's code against the first source;
+            // auth_token then maps that score back to player_a in the RPC.
+            existing.contestant_code = body.contestant_code;
             existing.benchmark_code = body.benchmark_code;
             existing.auth_token = body.auth_token;
+            existing.scoring_user_id = body.user_id;
             const queue = await this.state.storage.get("queue") || [];
             if (!queue.includes(existing.job_id)) {
               if (queue.length >= MAX_QUEUE_SIZE) {
@@ -426,6 +459,7 @@ class ScoringQueue {
       contestant_code: body.contestant_code,
       benchmark_code: body.benchmark_code,
       user_id: body.user_id,
+      scoring_user_id: body.user_id,
       user_ids: [body.user_id, body.opponent_id].filter(Boolean),
       auth_token: body.auth_token,
       match_id: Number.isInteger(body.match_id) ? body.match_id : null,
@@ -469,23 +503,25 @@ class ScoringQueue {
     if (Number.isInteger(job.match_id)) {
       await this.state.storage.put(`match:${job.match_id}`, job.job_id);
     }
+    await this.state.storage.setAlarm(Date.now() + MATCH_SUBMISSION_WINDOW_MS + MATCH_TIMEOUT_GRACE_MS);
     return jsonResponse(publicJob(job), 202);
   }
 
   async tryStartWaiting(job) {
-    if (Date.now() - Date.parse(job.created_at) > 60_000) {
-      job.status = "failed";
-      job.error_code = "opponent_timeout";
-      job.error = "Opponent did not submit within 60 seconds";
-      await this.state.storage.put(`job:${job.job_id}`, job);
-      return job;
-    }
     try {
       const match = await supabaseRpc(this.env, job.auth_token, "proxy_prepare_match", {
         p_match_id: job.match_id,
         p_source: job.contestant_code,
         p_sha256: job.sha256,
       });
+      if (match?.expired) {
+        await this.scheduleRoundAdvance(job.match_id);
+        job.status = "failed";
+        job.error_code = "opponent_timeout";
+        job.error = "Opponent submission deadline passed";
+        await this.state.storage.put(`job:${job.job_id}`, job);
+        return job;
+      }
       if (match?.ready) {
         job.status = "queued";
         job.benchmark_code = match.opponent_code;
@@ -497,6 +533,17 @@ class ScoringQueue {
         await this.state.storage.put("queue", queue);
         await this.state.storage.put(`job:${job.job_id}`, job);
         await this.state.storage.setAlarm(Date.now());
+        return job;
+      }
+      if (Date.now() - Date.parse(job.created_at) > MATCH_SUBMISSION_WINDOW_MS + MATCH_TIMEOUT_GRACE_MS) {
+        const resolution = await supabaseRpc(this.env, job.auth_token, "proxy_resolve_match_timeout", {
+          p_match_id: job.match_id,
+        });
+        if (resolution?.resolved) await this.scheduleRoundAdvance(job.match_id);
+        job.status = "failed";
+        job.error_code = "opponent_timeout";
+        job.error = "Opponent did not submit within 90 seconds";
+        await this.state.storage.put(`job:${job.job_id}`, job);
       }
     } catch (error) {
       console.log(`waiting_job_check_failed:${String(error).slice(0, 200)}`);
@@ -506,7 +553,79 @@ class ScoringQueue {
 
   async alarm() {
     await this.recoverInterruptedJobs();
+    await this.processDueRoundAdvances();
+    const waiting = [...(await this.state.storage.list({ prefix: "job:" })).values()]
+      .filter((job) => job.status === "waiting");
+    let nextWaitingAlarm = null;
+    for (const job of waiting) {
+      await this.tryStartWaiting(job);
+      if (job.status === "waiting") {
+        const timeoutAt = Date.parse(job.created_at) + MATCH_SUBMISSION_WINDOW_MS + MATCH_TIMEOUT_GRACE_MS;
+        nextWaitingAlarm = nextWaitingAlarm === null ? timeoutAt : Math.min(nextWaitingAlarm, timeoutAt);
+      }
+    }
     await this.dispatch();
+    const queueAfterDispatch = await this.state.storage.get("queue") || [];
+    await this.scheduleNextTournamentWake(nextWaitingAlarm, queueAfterDispatch.length > 0 || this.running.size > 0);
+  }
+
+  async scheduleRoundAdvance(matchId) {
+    const key = `advance:${matchId}`;
+    const dueAt = Date.now() + 60_000;
+    const waitingJobId = await this.state.storage.get(`match:${matchId}`);
+    if (waitingJobId) {
+      const waitingJob = await this.state.storage.get(`job:${waitingJobId}`);
+      if (waitingJob?.status === "waiting") {
+        waitingJob.status = "failed";
+        waitingJob.error_code = "opponent_timeout";
+        waitingJob.error = "Opponent submission deadline passed";
+        waitingJob.completed_at = new Date().toISOString();
+        await this.state.storage.put(`job:${waitingJobId}`, waitingJob);
+      }
+    }
+    const existing = await this.state.storage.get(key);
+    if (existing && existing >= dueAt) return;
+    await this.state.storage.put(key, dueAt);
+    const currentAlarm = await this.state.storage.getAlarm();
+    if (currentAlarm === null || dueAt < currentAlarm) await this.state.storage.setAlarm(dueAt);
+  }
+
+  async processDueRoundAdvances() {
+    const now = Date.now();
+    const entries = await this.state.storage.list({ prefix: "advance:" });
+    for (const [key, dueAt] of entries) {
+      if (dueAt > now) continue;
+      const matchId = Number(key.slice("advance:".length));
+      try {
+        await supabaseServiceRpc(this.env, "proxy_advance_match_round", { p_match_id: matchId });
+        await this.state.storage.delete(key);
+      } catch (error) {
+        console.log(`swiss_round_advance_failed:${matchId}:${String(error).slice(0, 200)}`);
+        await this.state.storage.put(key, now + 30_000);
+      }
+    }
+  }
+
+  async scheduleNextTournamentWake(nextWaitingAlarm, dispatchActive) {
+    const entries = await this.state.storage.list({ prefix: "advance:" });
+    let nextDue = nextWaitingAlarm;
+    for (const dueAt of entries.values()) {
+      nextDue = nextDue === null ? dueAt : Math.min(nextDue, dueAt);
+    }
+    if (nextDue === null) return;
+    const currentAlarm = await this.state.storage.getAlarm();
+    if (dispatchActive && currentAlarm !== null && currentAlarm < nextDue) return;
+    const alarmAt = Math.max(Date.now() + 1000, nextDue);
+    if (currentAlarm === null || currentAlarm > alarmAt) await this.state.storage.setAlarm(alarmAt);
+  }
+
+  async notifyRoundAdvance(matchId) {
+    const id = this.env.SCORING_QUEUE.idFromName("global");
+    await this.env.SCORING_QUEUE.get(id).fetch("https://queue/schedule-advance", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ match_id: matchId }),
+    });
   }
 
   async recoverInterruptedJobs() {
@@ -523,6 +642,21 @@ class ScoringQueue {
       changed = true;
     }
     if (changed) await this.state.storage.put("queue", queue);
+  }
+
+  async finishMatchWithScoringException(job, errorCode, message) {
+    const completion = await supabaseServiceRpc(this.env, "proxy_fail_match", {
+      p_match_id: job.match_id,
+      p_error_code: errorCode,
+      p_error_message: String(message || "scoring did not complete").slice(0, 500),
+    });
+    if (completion?.finalized) await this.scheduleRoundAdvance(job.match_id);
+    else await this.state.storage.delete(`match:${job.match_id}`);
+    job.status = "failed";
+    job.error_code = errorCode;
+    job.error = String(message || "Scoring did not complete").slice(0, 500);
+    job.completed_at = new Date().toISOString();
+    await this.state.storage.put(`job:${job.job_id}`, job);
   }
 
   async dispatch() {
@@ -550,6 +684,12 @@ class ScoringQueue {
       scanned += 1;
       const job = await this.state.storage.get(`job:${jobId}`);
       if (!job || job.status !== "queued") continue;
+      if (job.match_id && job.match_scoring_deadline && Date.now() >= job.match_scoring_deadline) {
+        await this.finishMatchWithScoringException(
+          job, "scoring_timeout", "No scoring result within eight minutes after processing began",
+        );
+        continue;
+      }
       if (job.retry_at && job.retry_at > Date.now()) {
         nextRetryAt = nextRetryAt === null
           ? job.retry_at
@@ -558,6 +698,9 @@ class ScoringQueue {
         continue;
       }
       job.status = "running";
+      if (job.match_id && !job.match_scoring_deadline) {
+        job.match_scoring_deadline = Date.now() + MATCH_SCORING_MAX_MS;
+      }
       job.started_at = new Date().toISOString();
       job.retry_at = null;
       job.attempts += 1;
@@ -593,6 +736,7 @@ class ScoringQueue {
           code: runnerSource(job.contestant_code, job.benchmark_code),
           input: "",
         }),
+        signal: AbortSignal.timeout(UPSTREAM_REQUEST_TIMEOUT_MS),
       });
       const responseText = await upstream.text();
       let payload;
@@ -612,11 +756,14 @@ class ScoringQueue {
         throw error;
       }
       const result = parseCompilerResult(payload);
-      if (job.match_id && job.auth_token) {
-        await supabaseRpc(this.env, job.auth_token, "proxy_complete_match", {
+      if (job.match_id) {
+        const completion = await supabaseServiceRpc(this.env, "proxy_complete_match", {
           p_match_id: job.match_id,
           p_score_a: result.match_score,
+          p_scoring_user_id: job.scoring_user_id || job.user_id,
         });
+        if (completion?.finalized) await this.scheduleRoundAdvance(job.match_id);
+        else await this.state.storage.delete(`match:${job.match_id}`);
       }
       await this.finish(job, result);
     } catch (error) {
@@ -630,15 +777,19 @@ class ScoringQueue {
       }));
       const current = await this.state.storage.get(`job:${job.job_id}`);
       if (!current) return;
-      const retryable = /upstream_http_(429|500|502|503|504)|fetch/i.test(message);
-      if (retryable && job.attempts < MAX_RETRIES) {
+      const retryable = /upstream_http_(429|500|502|503|504)|fetch|abort|timeout/i.test(message);
+      const retryLimit = job.match_id ? MATCH_MAX_RETRIES : MAX_RETRIES;
+      const upstreamRetrySeconds = error instanceof Error && error.retryAfterSeconds !== null &&
+        error.retryAfterSeconds !== undefined
+        ? Math.max(5, error.retryAfterSeconds)
+        : message.startsWith("upstream_http_429") ? 30 : UPSTREAM_INTERVAL_MS / 1000;
+      const retrySeconds = job.match_id ? Math.min(60, upstreamRetrySeconds) : upstreamRetrySeconds;
+      const retryWithinDeadline = !job.match_id || !job.match_scoring_deadline ||
+        Date.now() + retrySeconds * 1000 < job.match_scoring_deadline;
+      if (retryable && job.attempts <= retryLimit && retryWithinDeadline) {
         job.status = "queued";
         job.error = message;
         job.error_code = "retry_scheduled";
-        const retrySeconds = error instanceof Error && error.retryAfterSeconds !== null &&
-          error.retryAfterSeconds !== undefined
-          ? Math.max(5, error.retryAfterSeconds)
-          : message.startsWith("upstream_http_429") ? 30 : UPSTREAM_INTERVAL_MS / 1000;
         job.retry_at = Date.now() + retrySeconds * 1000;
         const queue = await this.state.storage.get("queue") || [];
         queue.push(job.job_id);
@@ -646,6 +797,13 @@ class ScoringQueue {
         await this.state.storage.put("queue", queue);
         await this.state.storage.setAlarm(job.retry_at);
       } else {
+        if (job.match_id) {
+          await this.finishMatchWithScoringException(
+            job,
+            retryable ? "onlinecompiler_timeout" : "onlinecompiler_error",
+            message,
+          );
+        }
         job.status = "failed";
         job.error_code = retryable ? "upstream_retry_exhausted" : "upstream_rejected";
         job.error = message.slice(0, 500);
@@ -743,6 +901,18 @@ export default {
         const match = await supabaseRpc(env, user.token, "proxy_prepare_match", {
           p_match_id: matchId, p_source: contestant, p_sha256: sha256,
         });
+        if (match?.expired) {
+          const queue = env.SCORING_QUEUE.idFromName("global");
+          await env.SCORING_QUEUE.get(queue).fetch("https://queue/schedule-advance", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ match_id: matchId }),
+          });
+          return jsonResponse({ detail: "Hết thời gian nộp cho trận này; hệ thống đã chốt kết quả." }, 409);
+        }
+        if (match?.cooldown) {
+          return jsonResponse({ detail: "Lượt BO2 kế tiếp chưa mở; thời gian nghỉ giữa hai lượt là 1 phút." }, 409);
+        }
         opponentUserId = match?.opponent_id || null;
         if (!match?.ready) {
           const queue = env.SCORING_QUEUE.idFromName("global");

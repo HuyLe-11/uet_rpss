@@ -15,6 +15,7 @@ Deploy the JavaScript Worker from this directory:
 ```sh
 npx wrangler secret put ONLINECOMPILER_API_KEY
 npx wrangler secret put SUPABASE_ANON_KEY
+npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 npx wrangler dev
 npx wrangler deploy
 ```
@@ -52,9 +53,11 @@ response is initially `202` with a `job_id`; the browser polls
 
 For an official match, send `match_id`; the Worker calls the
 `proxy_prepare_match` RPC and waits for the other contestant's source for up
-to 60 seconds. For a standalone practice request, send `benchmark_code`
-instead. The official match completion calls `proxy_complete_match`, so the
-browser does not need a privileged Supabase key.
+to 90 seconds. For a standalone practice request, send `benchmark_code`
+instead. The Worker records the result through `proxy_complete_match`; the
+official match UI polls Supabase rather than repeatedly polling this Worker.
+After all matches in a Swiss round finish, the Worker schedules the next round
+after a one-minute cooldown and asks Supabase to create its pairings.
 
 Official match jobs are keyed by `match_id` inside the Durable Object. If both
 contestants submit at nearly the same time, their requests share one queue job

@@ -32,18 +32,18 @@ begin
   insert into public.tournament_reset_cleanup(storage_path)
     select storage_path from public.replay_objects on conflict (storage_path) do nothing;
   get diagnostics v_replays = row_count;
-  delete from public.replay_objects;
-  delete from public.submissions;
-  delete from public.daily_results;
-  delete from public.round_byes;
-  delete from public.matches;
-  delete from public.contest_days;
-  delete from public.round_members;
-  delete from public.round_advancement;
-  delete from public.live_scores;
-  delete from public.scoring_jobs;
+  delete from public.replay_objects where true;
+  delete from public.submissions where true;
+  delete from public.daily_results where true;
+  delete from public.round_byes where true;
+  delete from public.matches where true;
+  delete from public.contest_days where true;
+  delete from public.round_members where true;
+  delete from public.round_advancement where true;
+  delete from public.live_scores where true;
+  delete from public.scoring_jobs where true;
   get diagnostics v_jobs = row_count;
-  delete from public.admin_disqualifications;
+  delete from public.admin_disqualifications where true;
   update public.profiles set status = 'new', entry_score = null where role = 'contestant';
   update public.tournament_state set phase = 'entry', current_round = 0, current_day = 0,
     pending_day = 0, accepting_submissions = true, champion_id = null, updated_at = now() where id = 1;

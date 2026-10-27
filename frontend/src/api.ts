@@ -328,6 +328,14 @@ export interface TodayMatch {
   grp: number;
   opponent: string;
   state: string;
+  my_submission_state: 'waiting' | 'submitting' | 'submitted' | 'late' | 'resolved';
+  opponent_submission_state: 'waiting' | 'submitting' | 'submitted' | 'late' | 'resolved';
+  submission_deadline: string | null;
+  my_match_score: number | null;
+  my_match_points: number;
+  scoring_error: string | null;
+  attempts_completed: number;
+  can_submit: boolean;
 }
 
 export async function getMyTodayMatches(): Promise<TodayMatch[]> {

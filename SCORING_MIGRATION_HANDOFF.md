@@ -208,12 +208,37 @@ chưa được deploy production và chưa được apply lên Supabase thật.*
 - Với trận chính, frontend gửi source bot và `match_id`. Worker lưu source theo
   `(match_id, user_id)`, chạy ngay khi có source của cả hai bên, sau đó gọi RPC
   ghi `score_a`/`points_a`/`points_b` và xóa source tạm.
-- Nếu đối thủ chưa gửi, Worker trả trạng thái chờ với thời hạn mục tiêu 60 giây.
-  Cơ chế timeout/retry cần kiểm thử trên Durable Object thật trước khi coi là
-  production-ready.
-- Giữ fallback scoring module/Judge0 cũ theo yêu cầu rollback. Khi
-  `VITE_SCORING_PROXY_URL` chưa cấu hình hoặc chưa có `match_id`, frontend vẫn
-  đi theo flow scoring job cũ.
+- Nếu đối thủ chưa gửi, Worker chờ 90 giây rồi xử thắng/thua bằng RPC.
+  Official match UI đọc trạng thái từ Supabase thay vì poll Durable Object liên
+  tục, để giảm request trên Workers Free.
+- Durable Objects Free có hạn mức 100.000 request/ngày và request này tính cả
+  lần gọi alarm; tránh poll job của từng thí sinh qua Worker mỗi vài giây.
+- Migration `0026_cloudflare_proxy_match_flow.sql` sửa luồng chính thức: sau khi
+  đóng vòng loại hoặc mở ngày online, Supabase sinh pairing lượt 1 ngay; frontend
+  chọn từng `match_id` và gửi bài thẳng tới Worker. Worker merge source của người
+  nộp thứ hai vào job đang chờ; timeout được ghi thành forfeit qua RPC.
+- Migration `0025_tournament_submission_windows.sql` còn để lại bảng nguồn theo
+  ngày từ nhánh thử nghiệm cũ, nhưng luồng chính thức không đọc bảng đó nữa.
+  Migration `0026` gỡ trigger deadline cũ và dùng `proxy_match_submissions` theo
+  từng trận.
+- Migration `0027_fix_prepare_swiss_round_conflict.sql` sửa lỗi `player_a is
+  ambiguous` trong `prepare_swiss_round`; apply migration này nếu `0026` đã chạy.
+- Migration `0028_match_submission_window_90_seconds.sql` nâng thời gian phản
+  hồi lên 90 giây và trả điểm/kết quả của từng trận cho màn hình người chơi.
+- Migration `0029_proxy_scoring_timeout_exception.sql` giới hạn mỗi request
+  chấm ở 120 giây, retry tối đa hai lần và chốt ngoại lệ sau tối đa tám phút
+  kể từ lúc bắt đầu xử lý; nếu vẫn lỗi thì ghi mã ngoại lệ và xử hòa 0 điểm để
+  không treo trận. RPC ghi điểm/ngoại lệ yêu cầu service-role Worker key.
+- Migration `0030_advance_swiss_round_after_match.sql` để Worker yêu cầu SQL
+  ghép lượt Swiss kế tiếp sau khi toàn bộ các cặp của lượt hiện tại đã chốt và
+  đã nghỉ tối thiểu một phút.
+- Migration `0031_two_bo2_attempts_per_match.sql` cho mỗi cặp hai lượt chấm
+  BO2, nghỉ một phút giữa hai lượt; điểm bốn ván được cộng lại và chỉ chốt
+  điểm trận sau lượt BO2 thứ hai. Không có đồng hồ chờ lượt này trên giao diện.
+- Worker chạy hai ván đổi lượt đi trước mỗi BO2; màn hình kết quả của trận
+  chính hiển thị tổng bốn ván và tên đối thủ.
+- Scoring module/Judge0 có thể còn trong workspace làm công cụ rollback, nhưng
+  trận vòng đấu chính thức phải gửi `match_id` qua Cloudflare Worker.
 - Arena đã đổi sang OnlineCompiler widget, có template bot bên dưới và nút
   copy template. Arena không ghi điểm vào thành tích giải.
 - Màn hình chính đã có nút `Nộp bài`, IDE Monaco lớn hơn, lựa chọn file/code,
@@ -231,6 +256,7 @@ Trong `servers/scoring/cloudflare_proxy/`:
 ```sh
 npx wrangler secret put ONLINECOMPILER_API_KEY
 npx wrangler secret put SUPABASE_ANON_KEY
+npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 npx wrangler deploy
 ```
 
@@ -243,19 +269,21 @@ VITE_ONLINE_COMPILER_KEY=<public-widget-key-if-provided>
 ```
 
 Không đưa `ONLINECOMPILER_API_KEY`, Supabase service-role key hoặc queue admin
-token vào frontend/Vercel.
+token vào frontend/Vercel. Service-role key chỉ được lưu thành Cloudflare Worker
+secret để Worker ghi kết quả/ngoại lệ chấm; RPC `proxy_prepare_match` vẫn dùng
+JWT thí sinh.
 
 ### Việc bắt buộc trước khi dùng thật
 
-- [ ] Apply `0017_cloudflare_proxy_matches.sql` và
-  `0018_proxy_match_context.sql` sau các migration nền tảng hiện có.
+- [ ] Apply các migration Cloudflare từ `0017` đến `0031` theo thứ tự trong
+  `data/SUPABASE_SETUP.md`.
 - [ ] Kiểm tra schema `public.matches` đang có các cột `state`,
   `points_a`, `points_b`, `started_at`, `finished_at`; hai migration mới phụ
   thuộc vào các cột này.
 - [ ] Deploy Worker với Supabase URL/key thật và kiểm tra CORS preflight,
   JWT hết hạn, user không thuộc match, match ID giả và job của user khác.
 - [ ] Kiểm thử hai tài khoản gửi cùng `match_id`: gửi trước, gửi sau, gửi lại,
-  gửi sai cặp và timeout 60 giây.
+  gửi sai cặp và timeout 90 giây.
 - [ ] Xác minh việc ghi kết quả qua RPC không làm mất logic finalize ngày,
   bảng xếp hạng, replay và chuyển vòng.
 - [ ] Bổ sung/chốt đường vòng loại trực tiếp trên Worker nếu muốn loại bỏ
@@ -272,9 +300,8 @@ token vào frontend/Vercel.
 - Source bot và access token đang được giữ trong Durable Object job state để
   Worker có thể gọi Supabase sau khi job hoàn tất. Cần đánh giá lại retention,
   log redaction và cách revoke token; không ghi source/token vào log.
-- Việc Worker gọi RPC bằng JWT người dùng giúp giữ RLS/user scope, nhưng RPC
-  `proxy_complete_match` hiện cho phép một trong hai người chơi gọi và quy đổi
-  hướng điểm theo người gọi. Cần test kỹ tính đối xứng score trước production.
+- `proxy_complete_match` và `proxy_fail_match` chỉ được gọi bằng service-role
+  secret từ Worker; không được đưa secret này vào frontend.
 - Luồng chấm official mới đã được nối ở frontend nhưng chưa thay thế toàn bộ
   các luồng `entry`/`test`; fallback cũ vẫn tồn tại có chủ đích.
 - `VITE_ONLINE_COMPILER_KEY` là public widget key, không phải secret. Nếu
