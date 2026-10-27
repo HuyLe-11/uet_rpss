@@ -1,0 +1,11 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>OTT queue load test</title>
+<style>body{font:15px system-ui;max-width:900px;margin:2rem auto}table{border-collapse:collapse}
+td{border:1px solid #ccc;padding:.5rem 1rem}.note{background:#fff7d6;padding:1rem}</style>
+</head><body><h1>OTT Durable Object queue load test</h1>
+<p class="note">The queue wait is measured from the accepted POST until the
+job reports <code>started_at</code>. Upstream concurrency is controlled by the
+Durable Object, not by this client.</p>
+<table><tr><td>Requested</td><td>50</td></tr><tr><td>Accepted</td><td>50</td></tr><tr><td>Succeeded</td><td>50</td></tr><tr><td>Failed</td><td>0</td></tr><tr><td>Timed out</td><td>0</td></tr><tr><td>Wall time (s)</td><td>106.42848086357117</td></tr><tr><td>Throughput (completed/s)</td><td>0.4697986680920838</td></tr><tr><td>Submit latency</td><td>mean 237.79 ms · p95 378.63 ms · p99 544.83 ms · max 699.17 ms</td></tr><tr><td>Queue wait</td><td>mean 40372.83 ms · p95 75656.49 ms · p99 79077.60 ms · max 80651.68 ms</td></tr><tr><td>Completion time</td><td>mean 41400.99 ms · p95 76643.09 ms · p99 80034.57 ms · max 81582.68 ms</td></tr></table>
+<p>Per-job data: <a href="queue-load-report.csv">queue-load-report.csv</a></p>
+</body></html>

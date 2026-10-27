@@ -26,6 +26,78 @@ class Judge0Error(RuntimeError):
         super().__init__(message)
 
 
+def _proxy_url():
+    raw = os.environ.get("OTT_SCORING_PROXY_URL", "").strip()
+    if not raw:
+        return None
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise Judge0Error("proxy_invalid_url", "OTT_SCORING_PROXY_URL must be an absolute HTTP(S) URL")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise Judge0Error("proxy_invalid_url", "OTT_SCORING_PROXY_URL must not contain credentials, query, or fragment")
+    return raw.rstrip("/")
+
+
+def _run_proxy_match(contestant, benchmark, max_seconds):
+    endpoint = f"{_proxy_url()}/v1/score"
+    token = os.environ.get("OTT_SCORING_PROXY_TOKEN", "").strip()
+    if not token:
+        raise Judge0Error("proxy_not_configured", "OTT_SCORING_PROXY_TOKEN is required when the proxy engine is enabled")
+    payload = json.dumps({
+        "contestant_code": contestant.decode("utf-8"),
+        "benchmark_code": benchmark.decode("utf-8"),
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=max_seconds + 10) as response:
+            response_body = json.loads(response.read())
+            status = response.status
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")[:500]
+        raise Judge0Error("proxy_http_error", f"Cloudflare scoring proxy returned HTTP {error.code}: {detail}") from None
+    except (urllib.error.URLError, TimeoutError) as error:
+        raise Judge0Error("proxy_unavailable", f"Could not reach Cloudflare scoring proxy: {error}") from None
+    except json.JSONDecodeError:
+        raise Judge0Error("proxy_invalid_response", "Cloudflare scoring proxy returned invalid JSON") from None
+
+    job_id = response_body.get("job_id")
+    if status == 202 and isinstance(job_id, str):
+        deadline = time.monotonic() + max_seconds + 180
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(
+                    urllib.request.Request(
+                        f"{endpoint}/{urllib.parse.quote(job_id)}",
+                        headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
+                    ),
+                    timeout=15,
+                ) as poll_response:
+                    response_body = json.loads(poll_response.read())
+            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+                raise Judge0Error("proxy_poll_failed", f"Could not poll Cloudflare scoring proxy: {error}") from None
+            if response_body.get("status") in {"queued", "running"}:
+                time.sleep(1)
+                continue
+            break
+
+    score = response_body.get("match_score")
+    games = response_body.get("games")
+    if isinstance(score, bool) or not isinstance(score, int) or score not in (-2, -1, 0, 1, 2):
+        raise Judge0Error("proxy_invalid_output", "Cloudflare scoring proxy returned an invalid score")
+    if not isinstance(games, list) or len(games) != 2:
+        raise Judge0Error("proxy_invalid_output", "Cloudflare scoring proxy returned an invalid BO2 replay")
+    return {"match_score": score, "games": games, "duration_seconds": 0}
+
+
 def _judge0_url(value=None):
     raw = (value or os.environ.get("OTT_JUDGE0_URL", "http://127.0.0.1:2358")).strip()
     parsed = urllib.parse.urlparse(raw)
@@ -259,6 +331,10 @@ def judge0_status(base_url=None):
 
 def run_match(contestant: bytes, benchmark: bytes, base_url=None, language_id=None, max_seconds=None):
     """Submit and poll a BO2 execution; return score and raw replay games."""
+    proxy_url = _proxy_url()
+    if proxy_url:
+        return _run_proxy_match(contestant, benchmark, float(max_seconds or os.environ.get("OTT_JUDGE0_MAX_SECONDS", "140")))
+
     base_url = _judge0_url(base_url)
     source = _runner_source(contestant, benchmark)
     language_id = int(language_id or os.environ.get("OTT_JUDGE0_PYTHON_ID", "71"))

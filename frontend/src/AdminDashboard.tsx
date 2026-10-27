@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Activity, Ban, Check, CircleAlert, Cloud, Database, Eye,
+  Activity, Ban, Check, CircleAlert, Database, Eye,
   FileSpreadsheet, Gauge, RefreshCw, Server, ShieldCheck,
   Swords, Trophy, Upload, Users, UserX, RotateCcw,
 } from 'lucide-react';
-import { getScoringAdminMetrics, getScoringBenchmarks, postScoringAdmin, probeScoringServer, supabase, uploadScoringBenchmark, type ScoringBenchmark } from './api';
+import { getScoringProxyUrl, supabase } from './api';
 import { BarList, ColumnChart } from './Charts';
 
 type Section = 'tournament' | 'eliminated' | 'server' | 'observation' | 'monitor';
@@ -56,28 +56,10 @@ async function drainReplayCleanupQueue(): Promise<{ deleted: number; complete: b
   }
 }
 
-async function drainLocalSourceCleanup(url: string): Promise<{ deleted: number; complete: boolean }> {
-  let deleted = 0;
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const result = await postScoringAdmin<any>(url, '/v1/admin/tournament/cleanup-reset-artifacts');
-    const progress = result?.source_cleanup;
-    deleted += Number(progress?.deleted || 0);
-    if (progress?.complete) return { deleted, complete: true };
-    if (!progress?.deleted) return { deleted, complete: false };
-  }
-  return { deleted, complete: false };
-}
-
 export default function AdminDashboard({ route, navigate }: { route: string; navigate: (path: string) => void }) {
   const section = sectionForRoute(route);
   const [snapshot, setSnapshot] = useState<MonitorSnapshot | null>(null);
-  const [scoringUrl, setScoringUrl] = useState('');
-  const [urlTouched, setUrlTouched] = useState(false);
-  const [moduleMetrics, setModuleMetrics] = useState<Record<string, any> | null>(null);
-  const [serverStatus, setServerStatus] = useState<'unknown' | 'checking' | 'online' | 'offline'>('unknown');
-  const [serverLatency, setServerLatency] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [phase, setPhase] = useState<'entry' | 'round' | 'done'>('entry');
@@ -89,10 +71,8 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
   const [replayCleanupBusy, setReplayCleanupBusy] = useState(false);
   const [eliminatedContestants, setEliminatedContestants] = useState<Array<Record<string, any>>>([]);
   const [contestantActionId, setContestantActionId] = useState<string | null>(null);
+  const [clearSubmissionsId, setClearSubmissionsId] = useState<string | null>(null);
 
-  const [benchmarkFile, setBenchmarkFile] = useState<File | null>(null);
-  const [benchmarks, setBenchmarks] = useState<ScoringBenchmark[]>([]);
-  const [benchmarkBusy, setBenchmarkBusy] = useState(false);
 
   const refresh = useCallback(async (showSpinner = true) => {
     if (showSpinner) setLoading(true);
@@ -108,7 +88,6 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
         result.live_standings = liveData;
       }
       setSnapshot(result);
-      if (!urlTouched) setScoringUrl(result.state.scoring_module_url || '');
       setPhase(result.state.phase);
       setAccepting(result.state.accepting_submissions);
       setRound(result.state.current_round || 1);
@@ -119,7 +98,7 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
     } finally {
       if (showSpinner) setLoading(false);
     }
-  }, [urlTouched]);
+  }, []);
 
   const refreshEliminated = useCallback(async () => {
     const { data, error: rpcError } = await supabase.rpc('admin_list_eliminated_contestants');
@@ -160,35 +139,6 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
     };
   }, [refresh, refreshEliminated, section]);
 
-  useEffect(() => {
-    if (section !== 'monitor' || !scoringUrl) return;
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const metrics = await getScoringAdminMetrics(scoringUrl);
-        if (!cancelled) { setModuleMetrics(metrics); setServerStatus('online'); }
-      } catch {
-        if (!cancelled) { setModuleMetrics(null); setServerStatus('offline'); }
-      }
-    };
-    void poll();
-    const timer = window.setInterval(() => void poll(), 20_000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [section, scoringUrl]);
-
-  useEffect(() => {
-    if (section !== 'server' || !scoringUrl) return;
-    let cancelled = false;
-    void getScoringBenchmarks(scoringUrl).then((items) => { if (!cancelled) setBenchmarks(items); })
-      .catch((err: any) => {
-        if (!cancelled) {
-          setBenchmarks([]);
-          setError(err?.message || 'Không tải được bot mẫu; hãy kiểm tra địa chỉ máy chấm và phiên bản máy chấm.');
-        }
-      });
-    return () => { cancelled = true; };
-  }, [section, scoringUrl]);
-
   const jobs = snapshot?.jobs || [];
   const activeJobs = jobs.filter((job) => ['dispatching', 'accepted', 'running'].includes(job.status));
   const failedJobs = jobs.filter((job) => ['failed', 'timed_out', 'dispatch_failed'].includes(job.status));
@@ -199,51 +149,6 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
       .filter((value): value is number => value !== null && value >= 0);
     return durations.length ? `${(durations.reduce((a, b) => a + b, 0) / durations.length).toFixed(1)} giây` : '—';
   }, [finishedJobs]);
-
-  async function checkServer() {
-    setServerStatus('checking');
-    setError('');
-    const start = performance.now();
-    try {
-      await probeScoringServer(scoringUrl);
-      const metrics = await getScoringAdminMetrics(scoringUrl);
-      setModuleMetrics(metrics);
-      setServerLatency(Math.round(performance.now() - start));
-      setServerStatus('online');
-      setMessage('Đã kết nối máy chấm và xác nhận có thể nhận yêu cầu.');
-    } catch (err: any) {
-      setModuleMetrics(null);
-      setServerStatus('offline');
-      setError(err?.message || 'Không kết nối được máy chấm.');
-    }
-  }
-
-  async function saveServerUrl() {
-    setSaving(true); setError(''); setMessage('');
-    try {
-      const { data, error: rpcError } = await supabase.rpc('set_scoring_module_url', { p_url: scoringUrl || null });
-      if (rpcError) throw rpcError;
-      setScoringUrl(data || ''); setUrlTouched(false);
-      setMessage(data ? 'Đã lưu URL chính thức; thí sinh sẽ nhận URL này làm mặc định.' : 'Đã xóa URL máy chấm chính thức.');
-      if (data) await checkServer();
-      await refresh(false);
-    } catch (err: any) {
-      setError(err?.message || 'Không lưu được URL máy chấm.');
-    } finally { setSaving(false); }
-  }
-
-  async function uploadBenchmark(event: FormEvent) {
-    event.preventDefault();
-    if (!benchmarkFile) return;
-    setBenchmarkBusy(true); setError(''); setMessage('');
-    try {
-      await uploadScoringBenchmark(scoringUrl, benchmarkFile);
-      setBenchmarkFile(null);
-      setBenchmarks(await getScoringBenchmarks(scoringUrl));
-      setMessage('Đã tải bot mẫu lên máy chấm; thí sinh có thể chọn bot này để luyện tập.');
-    } catch (err: any) { setError(err?.message || 'Không tải được bot mẫu.'); }
-    finally { setBenchmarkBusy(false); }
-  }
 
   async function refreshCurrentSection() {
     await refresh();
@@ -258,8 +163,18 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
   async function runTournamentAction(path: string, body?: unknown, successText = 'Đã gửi yêu cầu điều hành.') {
     setTournamentActionBusy(true); setError(''); setMessage('');
     try {
-      await postScoringAdmin(scoringUrl, `/v1/admin/tournament/${path}`, body);
-      setMessage(successText);
+      const rpcName = path === 'close-entry' ? 'admin_close_qualification'
+        : path === 'close-day' ? 'admin_close_tournament_day'
+          : path === 'open-day' ? 'admin_open_tournament_day'
+            : 'admin_resume_tournament_day';
+      const rpcArgs = path === 'open-day' ? { p_rnd: (body as any)?.round, p_day: (body as any)?.day } : undefined;
+      const { data, error: rpcError } = rpcArgs
+        ? await supabase.rpc(rpcName, rpcArgs)
+        : await supabase.rpc(rpcName);
+      if (rpcError) throw rpcError;
+      setMessage(path === 'close-entry'
+        ? `Đã chốt đầu vào và chia ${data?.qualified ?? ''} thí sinh vào ${data?.groups ?? 40} bảng.`
+        : successText);
       await refresh(false);
     } catch (err: any) { setError(err?.message || 'Không thực hiện được thao tác điều hành.'); }
     finally { setTournamentActionBusy(false); }
@@ -283,40 +198,16 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
     if (!confirmed) return;
     setResetBusy(true); setError(''); setMessage('');
     try {
-      let result: any;
-      let usedScoringServer = Boolean(scoringUrl);
-      try {
-        if (!scoringUrl) throw new TypeError('Scoring server is not configured');
-        result = await postScoringAdmin<any>(scoringUrl, '/v1/admin/tournament/reset');
-      } catch (err) {
-        if (!(err instanceof TypeError)) throw err;
-        usedScoringServer = false;
-        const { data, error: rpcError } = await supabase.rpc('admin_reset_tournament_to_entry', {
-          p_live_job_ids: [], p_live_match_ids: [],
-        });
-        if (rpcError) throw rpcError;
-        result = { result: data, source_cleanup: { deleted: 0, complete: false } };
-      }
-      const data = result?.result;
-      const sourceCleanup = result?.source_cleanup || { deleted: 0, complete: false };
-      let deletedSources = Number(sourceCleanup.deleted || 0);
-      let sourcesComplete = Boolean(sourceCleanup.complete);
-      if (!sourcesComplete && usedScoringServer) {
-        try {
-          const progress = await drainLocalSourceCleanup(scoringUrl);
-          deletedSources += progress.deleted;
-          sourcesComplete = progress.complete;
-        } catch { /* Keep the server-side cleanup queue for the retry action. */ }
-      }
+      const { data, error: rpcError } = await supabase.rpc('admin_reset_tournament_to_entry', {
+        p_live_job_ids: [], p_live_match_ids: [],
+      });
+      if (rpcError) throw rpcError;
       let cleanup = { deleted: 0, complete: false };
       try { cleanup = await drainReplayCleanupQueue(); } catch { /* Database reset has committed; cleanup can be retried below. */ }
       const cleanupMessage = cleanup.complete
         ? ` Đã xóa ${cleanup.deleted} file replay.`
         : ' Dữ liệu giải đã reset; một số replay chưa xóa khỏi kho lưu trữ. Có thể thử dọn lại.';
-      const sourceMessage = sourcesComplete
-        ? ` Đã xóa ${deletedSources} file bot trên máy chấm.`
-        : ' Một số file bot trên máy chấm còn trong hàng đợi dọn; có thể thử dọn lại.';
-      setMessage(`Đã reset về vòng đầu vào (ngày 0), xóa ${data?.deleted_scoring_jobs ?? 0} lượt chấm, làm trống bảng xếp hạng và thu hồi ${data?.recovered_orphaned_jobs ?? 0} job cũ bị bỏ lại.${sourceMessage}${cleanupMessage}`);
+      setMessage(`Đã reset về vòng đầu vào (ngày 0), xóa ${data?.deleted_scoring_jobs ?? 0} lượt chấm, làm trống bảng xếp hạng và thu hồi ${data?.recovered_orphaned_jobs ?? 0} job cũ bị bỏ lại.${cleanupMessage}`);
       await refresh(false);
     } catch (err: any) {
       const detail = String(err?.message || '');
@@ -328,19 +219,27 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
     } finally { setResetBusy(false); }
   }
 
+  async function clearContestantSubmissions(userId: string, username: string) {
+    if (!window.confirm(`Xóa toàn bộ bài nộp và lượt vòng loại của ${username}? Điểm vòng loại sẽ được xóa và thí sinh phải nộp lại. Thao tác không thể hoàn tác.`)) return;
+    setClearSubmissionsId(userId); setError(''); setMessage('');
+    try {
+      const { data, error: rpcError } = await supabase.rpc('admin_clear_contestant_submissions', { p_user_id: userId });
+      if (rpcError) throw rpcError;
+      let cleanup = { deleted: 0, complete: false };
+      try { cleanup = await drainReplayCleanupQueue(); } catch { /* Cleanup is queued and can be retried. */ }
+      setMessage(`Đã xóa ${data?.deleted_jobs ?? 0} lượt vòng loại, ${data?.deleted_submissions ?? 0} bài nộp và đặt lại điểm của ${username}.${cleanup.complete ? ` Đã xóa ${cleanup.deleted} replay.` : ' Replay còn lại được giữ trong hàng đợi dọn dẹp.'}`);
+      await refresh(false);
+    } catch (err: any) { setError(err?.message || 'Không xóa được dữ liệu bài nộp.'); }
+    finally { setClearSubmissionsId(null); }
+  }
+
   async function retryReplayCleanup() {
     setReplayCleanupBusy(true); setError(''); setMessage('');
     try {
-      let sourceResult = { deleted: 0, complete: true };
-      if (scoringUrl) {
-        try { sourceResult = await drainLocalSourceCleanup(scoringUrl); }
-        catch { sourceResult = { deleted: 0, complete: false }; }
-      }
       const result = await drainReplayCleanupQueue();
-      const fullyComplete = result.complete && sourceResult.complete;
-      setMessage(fullyComplete
-        ? `Đã dọn ${sourceResult.deleted} file bot và ${result.deleted} file replay còn tồn.`
-        : `Đã dọn ${sourceResult.deleted} file bot và ${result.deleted} file replay; vẫn còn file trong hàng đợi, hãy thử lại.`);
+      setMessage(result.complete
+        ? `Đã dọn ${result.deleted} file replay còn tồn.`
+        : `Đã dọn ${result.deleted} file replay; vẫn còn file trong hàng đợi, hãy thử lại.`);
     } catch (err: any) {
       setError(err?.message || 'Không thể tải hàng đợi dọn replay.');
     } finally { setReplayCleanupBusy(false); }
@@ -357,6 +256,21 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
       await Promise.all([refresh(false), refreshEliminated()]);
     } catch (err: any) {
       setError(err?.message || 'Không cập nhật được trạng thái thí sinh.');
+    } finally { setContestantActionId(null); }
+  }
+
+  async function setQualificationStatus(userId: string, qualified: boolean) {
+    setContestantActionId(userId); setError(''); setMessage('');
+    try {
+      const { error: rpcError } = await supabase.rpc('admin_set_qualification_status', {
+        p_user_id: userId, p_qualified: qualified,
+      });
+      if (rpcError) throw rpcError;
+      setMessage(qualified ? 'Đã đánh dấu thí sinh đã qua vòng loại.' : 'Đã chuyển thí sinh về chưa qua vòng loại.');
+      await refresh(false);
+      await refreshEliminated();
+    } catch (err: any) {
+      setError(err?.message || 'Không cập nhật được trạng thái vòng loại.');
     } finally { setContestantActionId(null); }
   }
 
@@ -383,7 +297,7 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
       {[
         ['/admin', 'Quản trị giải đấu', ShieldCheck],
         ['/admin/eliminated', 'Thí sinh bị loại', UserX],
-        ['/admin/server', 'Quản trị máy chấm', Server],
+        ['/admin/server', 'Cloudflare Proxy', Swords],
         ['/admin/observation', 'Quan sát hoạt động', Eye],
         ['/admin/monitor', 'Giám sát hệ thống', Gauge],
       ].map(([path, label, Icon]) => {
@@ -417,18 +331,17 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
         </div>
         <div className="phase-controls">
           {phase !== 'done' && <button className={accepting ? 'secondary' : 'primary'} disabled={tournamentActionBusy} onClick={() => void setSubmissionGate(!accepting)}>{accepting ? 'Đóng cổng nhận bài' : 'Mở cổng nhận bài'}</button>}
-          {phase === 'entry' && <button className="primary" disabled={tournamentActionBusy || !scoringUrl} onClick={() => void runTournamentAction('close-entry', undefined, 'Đã chốt đầu vào và chia thí sinh vào 40 bảng.')}>{tournamentActionBusy ? 'Đang xử lý…' : 'Chốt đầu vào & chia bảng'}</button>}
-          {phase === 'round' && round <= 4 && snapshot?.days.find((item) => item.rnd === round && item.day === day)?.state === 'open' && <button className="primary" disabled={tournamentActionBusy || !scoringUrl} onClick={() => void runTournamentAction('close-day', undefined, 'Đã chốt ngày; máy chấm đang xử lý các lượt đấu.')}>{tournamentActionBusy ? 'Đang xử lý…' : 'Chốt ngày & xử lý lượt còn lại'}</button>}
-          {phase === 'round' && round <= 4 && snapshot?.days.find((item) => item.rnd === round && item.day === day)?.state === 'grading' && <button className="primary" disabled={tournamentActionBusy || !scoringUrl} onClick={() => void runTournamentAction('resume-day', { round, day }, 'Đã yêu cầu tiếp tục chấm ngày.')}>{tournamentActionBusy ? 'Đang xử lý…' : 'Tiếp tục chấm ngày'}</button>}
-          {phase === 'round' && round <= 4 && snapshot?.days.find((item) => item.rnd === round && item.day === day)?.state === 'graded' && day < 7 && <button className="primary" disabled={tournamentActionBusy || !scoringUrl} onClick={() => void runTournamentAction('open-day', { round, day: day + 1 }, `Đã mở ngày ${day + 1} của vòng ${round}.`)}>Mở ngày {day + 1}</button>}
+          {phase === 'entry' && <button className="primary" disabled={tournamentActionBusy} onClick={() => void runTournamentAction('close-entry')}>{tournamentActionBusy ? 'Đang xử lý…' : 'Chốt đầu vào & chia bảng'}</button>}
+          {phase === 'round' && round <= 4 && snapshot?.days.find((item) => item.rnd === round && item.day === day)?.state === 'open' && <button className="primary" disabled={tournamentActionBusy} onClick={() => void runTournamentAction('close-day', undefined, 'Đã chốt ngày.')}>{tournamentActionBusy ? 'Đang xử lý…' : 'Chốt ngày'}</button>}
+          {phase === 'round' && round <= 4 && snapshot?.days.find((item) => item.rnd === round && item.day === day)?.state === 'graded' && day < 7 && <button className="primary" disabled={tournamentActionBusy} onClick={() => void runTournamentAction('open-day', { round, day: day + 1 }, `Đã mở ngày ${day + 1} của vòng ${round}.`)}>Mở ngày {day + 1}</button>}
           <button className="secondary" disabled={resetBusy || tournamentActionBusy} onClick={() => void resetTournament()}><RotateCcw size={16} />{resetBusy ? 'Đang reset…' : 'Reset giải về ngày 0'}</button>
           <button className="secondary" disabled={replayCleanupBusy} onClick={() => void retryReplayCleanup()}><Database size={16} />{replayCleanupBusy ? 'Đang dọn replay…' : 'Dọn replay còn tồn'}</button>
         </div>
         <p className="muted server-note">Reset giữ tài khoản, cấu hình giải và URL máy chấm; xóa dữ liệu thi/replay, gỡ trạng thái loại, đặt mọi thí sinh về đầu vào ngày 0. Nếu lượt chấm hoặc trận còn đang chạy, reset sẽ bị từ chối để tránh xóa dữ liệu giữa chừng; chờ hoàn tất rồi thử lại. Không thể hoàn tác.</p>
-        {!scoringUrl && <p className="muted server-note">Trước khi điều hành, cấu hình địa chỉ máy chấm trong mục “Quản trị máy chấm”.</p>}
         {phase === 'round' && round === 5 && <p className="muted server-note">Vòng thứ năm thi offline chưa được cài đặt. Hệ thống này chỉ vận hành các vòng online.</p>}
       </section>
-      <EntrantsTable entrants={snapshot?.entrants || []} />
+      <EntrantsTable entrants={snapshot?.entrants || []} phase={phase} busyId={clearSubmissionsId}
+        onClear={(id, username) => void clearContestantSubmissions(id, username)} />
       <section className="panel">
         <SectionHeading icon={ShieldCheck} eyebrow="TÀI KHOẢN QUẢN TRỊ" title="Quản lý bằng công cụ dòng lệnh an toàn" />
         <p>Việc tạo và import tài khoản admin được thực hiện bằng công cụ dòng lệnh trên máy tin cậy, không qua trình duyệt. Dùng <code>admin_cli_service</code> với khóa quản trị chỉ trên môi trường quản trị.</p>
@@ -452,31 +365,21 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
           <tbody>{(snapshot?.entrants || []).filter((contestant) => ['new', 'active'].includes(contestant.status)).map((contestant) => <tr key={contestant.id}>
             <td>{contestant.username}</td><td>{contestant.status === 'active' ? 'Đang thi đấu' : 'Chờ thi đầu vào'}</td>
             <td>{contestant.entry_score ?? '—'}</td><td>{contestant.grp == null ? '—' : contestant.grp + 1}</td>
-            <td><button className="secondary" disabled={contestantActionId === contestant.id} onClick={() => void setContestantElimination(contestant.id, true)}><Ban size={15} />Loại</button></td>
+            <td><button className="secondary" disabled={contestantActionId === contestant.id} onClick={() => void setQualificationStatus(contestant.id, false)}><Ban size={15} />Chưa qua vòng loại</button></td>
           </tr>)}</tbody>
         </table></div>
       </section>
     </>}
 
-    {section === 'server' && <>
-      <section className="panel"><SectionHeading icon={Cloud} eyebrow="URL CHÍNH THỨC" title="Địa chỉ kết nối máy chấm" />
-        <p>Địa chỉ này được lưu làm mặc định cho thí sinh khi gửi bài. Máy chấm cần cho phép kết nối từ tên miền website.</p>
-        <label>URL máy chấm<input type="url" value={scoringUrl} onChange={(event) => { setScoringUrl(event.target.value); setUrlTouched(true); }} placeholder="https://score.tenmiencuaban.vn" /></label>
-        <div className="phase-controls"><button className="primary" disabled={saving} onClick={() => void saveServerUrl()}>{saving ? 'Đang lưu…' : 'Lưu URL chính thức'}</button>
-          <button className="secondary" disabled={!scoringUrl || serverStatus === 'checking'} onClick={() => void checkServer()}><Activity size={16} />{serverStatus === 'checking' ? 'Đang kiểm tra…' : 'Kiểm tra kết nối'}</button></div>
-        <div className="server-status-row"><span className={`status-indicator ${serverStatus === 'online' ? 'online' : serverStatus === 'offline' ? 'offline' : ''}`} />
-          {serverStatus === 'online' ? `Đang hoạt động${serverLatency !== null ? ` · ${serverLatency} ms` : ''}` : serverStatus === 'offline' ? 'Không kết nối được' : serverStatus === 'checking' ? 'Đang kiểm tra' : 'Chưa kiểm tra'}</div>
-      </section>
-      <section className="panel"><SectionHeading icon={Swords} eyebrow="BOT LUYỆN TẬP" title="Quản lý bot mẫu" />
-        <p>Tải bot Python lên máy chấm để thí sinh chọn đấu luyện tập. Bot cần có hàm <code>choose_move(state)</code>; file tối đa 64 KB.</p>
-        <form onSubmit={(event) => void uploadBenchmark(event)} className="phase-controls">
-          <input type="file" accept=".py,text/x-python" onChange={(event) => setBenchmarkFile(event.target.files?.[0] || null)} />
-          <button className="primary" disabled={!scoringUrl || !benchmarkFile || benchmarkBusy}>{benchmarkBusy ? 'Đang tải…' : 'Tải bot mẫu lên'}</button>
-        </form>
-        {!benchmarks.length ? <p className="muted">Không tải được catalog. Kiểm tra URL/kết nối máy chấm.</p> : <ul>{benchmarks.map((bot) => <li key={bot.id}>{bot.name}</li>)}</ul>}
-      </section>
-      <SystemMetrics metrics={moduleMetrics} state={serverStatus} />
-    </>}
+    {section === 'server' && <section className="panel">
+      <SectionHeading icon={Swords} eyebrow="CLOUDFARE PROXY" title="Luồng chấm hiện tại" />
+      <p>Tất cả bài thi được ghép với một bot mẫu trong frontend và gửi trực tiếp qua Cloudflare Worker. Admin không còn cấu hình hoặc kiểm tra URL máy chấm cũ.</p>
+      <div className="monitor-list">
+        <div><span>Worker chấm</span><strong>{getScoringProxyUrl() || 'Chưa cấu hình'}</strong></div>
+        <div><span>Bot mẫu</span><strong>Được đóng gói cùng frontend</strong></div>
+        <div><span>OnlineCompiler key</span><strong>Được giữ trong Cloudflare Secret</strong></div>
+      </div>
+    </section>}
 
     {section === 'observation' && <>
       <div className="observation-summary"><span><strong>{activeJobs.length}</strong> lượt đang xử lý</span><span><strong>{snapshot?.entrants.filter((item) => item.submitted).length || 0}</strong> thí sinh đã nộp ngày hiện tại</span><span><strong>{snapshot?.matches.length || 0}</strong> trận gần nhất</span><span><strong>{failedJobs.length}</strong> lượt cần xem lại</span></div>
@@ -488,8 +391,8 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
 
     {section === 'monitor' && <>
       <div className="stat-grid">
-        <Metric icon={Server} label="Máy chấm" value={serverStatus === 'online' ? 'Đang hoạt động' : serverStatus === 'offline' ? 'Mất kết nối' : 'Chưa kiểm tra'} />
-        <Metric icon={Activity} label="Đang xử lý" value={moduleMetrics?.active_jobs ?? activeJobs.length} />
+        <Metric icon={Server} label="Cloudflare Proxy" value={getScoringProxyUrl() ? 'Đã cấu hình' : 'Chưa cấu hình'} />
+        <Metric icon={Activity} label="Lượt cần xử lý" value={activeJobs.length} />
         <Metric icon={Gauge} label="Thời gian chấm TB" value={averageDuration} />
         <Metric icon={Check} label="Tỉ lệ thành công" value={finishedJobs.length ? `${Math.round((Number(jobCounts.succeeded || 0) / Math.max(1, Object.values(jobCounts).reduce((sum, value) => sum + Number(value), 0))) * 100)}%` : '—'} />
       </div>
@@ -513,7 +416,6 @@ export default function AdminDashboard({ route, navigate }: { route: string; nav
           }))}
         />
       </div>
-      <SystemMetrics metrics={moduleMetrics} state={serverStatus} />
       <section className="panel"><SectionHeading icon={Database} eyebrow="KHO DỮ LIỆU TRẬN ĐẤU" title="Dung lượng replay đã ghi nhận" />
         <div className="monitor-list"><div><span>Bản ghi replay</span><strong>{snapshot?.replay_storage.objects ?? 0}</strong></div><div><span>Dữ liệu nén</span><strong>{formatBytes(snapshot?.replay_storage.bytes ?? 0)}</strong></div><div><span>Lần tải lên lỗi</span><strong>{snapshot?.replay_storage.failed ?? 0}</strong></div></div>
       </section>
@@ -530,11 +432,11 @@ function SectionHeading({ icon: Icon, eyebrow, title }: { icon: typeof Activity;
   return <div className="section-heading"><div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2></div><Icon size={19} className="muted" /></div>;
 }
 
-function EntrantsTable({ entrants }: { entrants: Array<Record<string, any>> }) {
+function EntrantsTable({ entrants, phase, busyId, onClear }: { entrants: Array<Record<string, any>>; phase: 'entry' | 'round' | 'done'; busyId: string | null; onClear: (id: string, username: string) => void }) {
   return <section className="panel"><SectionHeading icon={Users} eyebrow="DANH SÁCH THÍ SINH" title={`Theo dõi ${entrants.length} tài khoản`} />
     {!entrants.length ? <div className="empty-state"><Users /><h3>Chưa có thí sinh</h3><p>Tài khoản được tạo sẽ xuất hiện tại đây.</p></div> :
-      <div className="table-scroll"><table><thead><tr><th>Thí sinh</th><th>Trạng thái</th><th>Điểm vòng loại</th><th>Bảng</th><th>Lượt vòng loại</th><th>Bài ngày này</th><th>Hoạt động cuối</th></tr></thead><tbody>
-        {entrants.map((item) => <tr key={item.id}><td>{item.username}</td><td>{item.status}</td><td>{item.entry_score ?? '—'}</td><td>{item.grp ?? '—'}</td><td>{item.entry_attempts}/20</td><td>{item.submitted ? 'Đã nộp' : 'Chưa nộp'}</td><td>{formatTime(item.last_activity)}</td></tr>)}
+      <div className="table-scroll"><table><thead><tr><th>Thí sinh</th><th>Trạng thái</th><th>Điểm vòng loại</th><th>Bảng</th><th>Lượt vòng loại</th><th>Bài ngày này</th><th>Hoạt động cuối</th><th>Thao tác</th></tr></thead><tbody>
+        {entrants.map((item) => <tr key={item.id}><td>{item.username}</td><td>{item.status}</td><td>{item.entry_score ?? '—'}</td><td>{item.grp ?? '—'}</td><td>{item.entry_attempts}/20</td><td>{item.submitted ? 'Đã nộp' : 'Chưa nộp'}</td><td>{formatTime(item.last_activity)}</td><td><button className="secondary" disabled={phase !== 'entry' || busyId !== null} title={phase !== 'entry' ? 'Chỉ khả dụng trong giai đoạn vòng loại' : undefined} onClick={() => onClear(item.id, item.username)}>{busyId === item.id ? 'Đang xóa…' : 'Xóa bài & reset lượt'}</button></td></tr>)}
       </tbody></table></div>}
   </section>;
 }

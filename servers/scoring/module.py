@@ -79,7 +79,11 @@ _failed_jobs = 0
 _last_invalid_claim_log = 0.0
 
 app = FastAPI(title="OTT Scoring Module", version="1.0.0")
-origins = [x.strip() for x in os.environ.get("OTT_SCORING_CORS_ORIGINS", "").split(",") if x.strip()]
+origins = [
+    value.strip().rstrip("/")
+    for value in os.environ.get("OTT_SCORING_CORS_ORIGINS", "").split(",")
+    if value.strip()
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,

@@ -185,6 +185,137 @@ Những file cũ trong phần checklist phía trên được giữ làm lịch s
 - Build frontend đã chạy thành công sau thay đổi admin/URL. Chưa xác nhận SQL `0005` đã chạy và chưa xác minh deploy thực tế.
 - Chưa deploy-ready cho giải đấu đầy đủ: chấm giải ngày, close, ghép cặp, live/offline scoring, advancement và các đường SQLite còn lại chưa migrate. Có thể deploy để demo luồng auth, entry scoring, replay đã chuyển và quan sát cơ bản sau khi áp dụng `0005` và cấu hình env/CORS/tunnel.
 
+## Cập nhật chuyển sang Cloudflare Worker trực tiếp (2026-10-27)
+
+Đây là trạng thái code mới nhất sau khi chủ dự án yêu cầu loại bỏ scoring
+module chạy trên laptop khỏi đường truy cập web. **Các thay đổi trong workspace
+chưa được deploy production và chưa được apply lên Supabase thật.**
+
+### Đã triển khai trong workspace
+
+- Thêm đường gọi trực tiếp từ frontend tới Cloudflare Worker bằng
+  `VITE_SCORING_PROXY_URL`; request dùng Supabase access token trong header
+  `Authorization: Bearer <JWT>`.
+- Worker xác thực JWT bằng Supabase Auth endpoint trước khi nhận yêu cầu.
+  `ONLINECOMPILER_API_KEY` chỉ được đọc từ Worker secret.
+- Thêm Durable Object job polling cho `POST /v1/score` và
+  `GET /v1/score/{job_id}`; job được giới hạn quyền đọc theo `user_id`.
+- Thêm migration `0017_cloudflare_proxy_matches.sql` với bảng tạm
+  `proxy_match_submissions` và RPC:
+  `proxy_prepare_match`, `proxy_complete_match`.
+- Thêm migration `0018_proxy_match_context.sql`; RPC
+  `get_my_today_matches()` trả thêm `match_id` để frontend gửi đúng cặp đấu.
+- Với trận chính, frontend gửi source bot và `match_id`. Worker lưu source theo
+  `(match_id, user_id)`, chạy ngay khi có source của cả hai bên, sau đó gọi RPC
+  ghi `score_a`/`points_a`/`points_b` và xóa source tạm.
+- Nếu đối thủ chưa gửi, Worker chờ 90 giây rồi xử thắng/thua bằng RPC.
+  Official match UI đọc trạng thái từ Supabase thay vì poll Durable Object liên
+  tục, để giảm request trên Workers Free.
+- Durable Objects Free có hạn mức 100.000 request/ngày và request này tính cả
+  lần gọi alarm; tránh poll job của từng thí sinh qua Worker mỗi vài giây.
+- Migration `0026_cloudflare_proxy_match_flow.sql` sửa luồng chính thức: sau khi
+  đóng vòng loại hoặc mở ngày online, Supabase sinh pairing lượt 1 ngay; frontend
+  chọn từng `match_id` và gửi bài thẳng tới Worker. Worker merge source của người
+  nộp thứ hai vào job đang chờ; timeout được ghi thành forfeit qua RPC.
+- Migration `0025_tournament_submission_windows.sql` còn để lại bảng nguồn theo
+  ngày từ nhánh thử nghiệm cũ, nhưng luồng chính thức không đọc bảng đó nữa.
+  Migration `0026` gỡ trigger deadline cũ và dùng `proxy_match_submissions` theo
+  từng trận.
+- Migration `0027_fix_prepare_swiss_round_conflict.sql` sửa lỗi `player_a is
+  ambiguous` trong `prepare_swiss_round`; apply migration này nếu `0026` đã chạy.
+- Migration `0028_match_submission_window_90_seconds.sql` nâng thời gian phản
+  hồi lên 90 giây và trả điểm/kết quả của từng trận cho màn hình người chơi.
+- Migration `0029_proxy_scoring_timeout_exception.sql` giới hạn mỗi request
+  chấm ở 120 giây, retry tối đa hai lần và chốt ngoại lệ sau tối đa tám phút
+  kể từ lúc bắt đầu xử lý; nếu vẫn lỗi thì ghi mã ngoại lệ và xử hòa 0 điểm để
+  không treo trận. RPC ghi điểm/ngoại lệ yêu cầu service-role Worker key.
+- Migration `0030_advance_swiss_round_after_match.sql` để Worker yêu cầu SQL
+  ghép lượt Swiss kế tiếp sau khi toàn bộ các cặp của lượt hiện tại đã chốt và
+  đã nghỉ tối thiểu một phút.
+- Migration `0031_two_bo2_attempts_per_match.sql` cho mỗi cặp hai lượt chấm
+  BO2, nghỉ một phút giữa hai lượt; điểm bốn ván được cộng lại và chỉ chốt
+  điểm trận sau lượt BO2 thứ hai. Không có đồng hồ chờ lượt này trên giao diện.
+- Worker chạy hai ván đổi lượt đi trước mỗi BO2; màn hình kết quả của trận
+  chính hiển thị tổng bốn ván và tên đối thủ.
+- Scoring module/Judge0 có thể còn trong workspace làm công cụ rollback, nhưng
+  trận vòng đấu chính thức phải gửi `match_id` qua Cloudflare Worker.
+- Arena đã đổi sang OnlineCompiler widget, có template bot bên dưới và nút
+  copy template. Arena không ghi điểm vào thành tích giải.
+- Màn hình chính đã có nút `Nộp bài`, IDE Monaco lớn hơn, lựa chọn file/code,
+  menu Python hiện tại và lịch sử đấu có opponent ID/điểm/trạng thái.
+- Tab `Luật thi đấu` được đổi thành `Tài liệu và trạng thái`; tiến trình thi
+  đấu được đưa vào tab này.
+- Đã xóa key OnlineCompiler khỏi `frontend/.env` hiện có trong workspace.
+  Widget chỉ đọc `VITE_ONLINE_COMPILER_KEY` nếu ban tổ chức cấp một widget key
+  public riêng; không dùng API secret của OnlineCompiler.
+
+### Cấu hình cần có khi deploy Worker
+
+Trong `servers/scoring/cloudflare_proxy/`:
+
+```sh
+npx wrangler secret put ONLINECOMPILER_API_KEY
+npx wrangler secret put SUPABASE_ANON_KEY
+npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+npx wrangler deploy
+```
+
+`SUPABASE_URL` là biến Worker trong `wrangler.toml`, cần đổi từ giá trị mẫu
+thành project thật. Frontend cần:
+
+```env
+VITE_SCORING_PROXY_URL=https://<worker-domain>
+VITE_ONLINE_COMPILER_KEY=<public-widget-key-if-provided>
+```
+
+Không đưa `ONLINECOMPILER_API_KEY`, Supabase service-role key hoặc queue admin
+token vào frontend/Vercel. Service-role key chỉ được lưu thành Cloudflare Worker
+secret để Worker ghi kết quả/ngoại lệ chấm; RPC `proxy_prepare_match` vẫn dùng
+JWT thí sinh.
+
+### Việc bắt buộc trước khi dùng thật
+
+- [ ] Apply các migration Cloudflare từ `0017` đến `0031` theo thứ tự trong
+  `data/SUPABASE_SETUP.md`.
+- [ ] Kiểm tra schema `public.matches` đang có các cột `state`,
+  `points_a`, `points_b`, `started_at`, `finished_at`; hai migration mới phụ
+  thuộc vào các cột này.
+- [ ] Deploy Worker với Supabase URL/key thật và kiểm tra CORS preflight,
+  JWT hết hạn, user không thuộc match, match ID giả và job của user khác.
+- [ ] Kiểm thử hai tài khoản gửi cùng `match_id`: gửi trước, gửi sau, gửi lại,
+  gửi sai cặp và timeout 90 giây.
+- [ ] Xác minh việc ghi kết quả qua RPC không làm mất logic finalize ngày,
+  bảng xếp hạng, replay và chuyển vòng.
+- [ ] Bổ sung/chốt đường vòng loại trực tiếp trên Worker nếu muốn loại bỏ
+  scoring module hoàn toàn. Hiện vòng loại chưa có catalog bot và phép tính
+  trọng số `1×s0 + 2×s1 + 3×s2` trên Worker.
+- [ ] Cài Node.js rồi chạy `npm install` và `npm run build` trong `frontend`.
+- [ ] Cấu hình widget key public và kiểm tra widget OnlineCompiler thực tế.
+
+### Giới hạn và rủi ro đã biết
+
+- Cloudflare Free/Durable Objects không nên được xem là đã chịu tải giải thật
+  chỉ dựa trên load test cũ. Cần đo queue wait, giới hạn OnlineCompiler,
+  retry/429 và số trận đồng thời trên deployment thật.
+- Source bot và access token đang được giữ trong Durable Object job state để
+  Worker có thể gọi Supabase sau khi job hoàn tất. Cần đánh giá lại retention,
+  log redaction và cách revoke token; không ghi source/token vào log.
+- `proxy_complete_match` và `proxy_fail_match` chỉ được gọi bằng service-role
+  secret từ Worker; không được đưa secret này vào frontend.
+- Luồng chấm official mới đã được nối ở frontend nhưng chưa thay thế toàn bộ
+  các luồng `entry`/`test`; fallback cũ vẫn tồn tại có chủ đích.
+- `VITE_ONLINE_COMPILER_KEY` là public widget key, không phải secret. Nếu
+  OnlineCompiler không cấp widget key public hoặc widget cần secret, Arena
+  phải tiếp tục dùng proxy và không được đưa secret vào bundle.
+
+### Kiểm thử đã chạy trong workspace
+
+- `python3 -m py_compile servers/scoring/module.py servers/scoring/judge0_runner.py`
+  đã chạy thành công.
+- `git diff --check` đã chạy thành công.
+- Chưa chạy được build/type-check frontend vì môi trường hiện tại không có
+  `node`, `npm` hoặc `npx`.
+
 ## Quản trị reset và phục hồi ngày thi (2026-10-22)
 
 - Admin sidebar có menu độc lập `Thí sinh bị loại`; có thể ban/gỡ ban. Gỡ ban khôi phục `new` khi ở đầu vào, hoặc `active` nếu vẫn có thành viên ở vòng hiện hành. Người bị ban bị loại khỏi ghép Swiss mới; các trận chờ của họ được xử thua. Không cho ban khi trận của người đó đang chạy.
@@ -194,3 +325,60 @@ Những file cũ trong phần checklist phía trên được giữ làm lịch s
 - `0011_safe_tournament_reset_and_resume.sql` thay reset RPC thành service-role-only, đồng bộ lock của state với tạo scoring job, chuẩn bị pairing, finalize và claim match; finalize có thể retry sau response thất lạc. Áp dụng theo thứ tự 0008–0011 (0009 sửa tên cột `grp`, 0010 xử lý bảng một người/bye).
 - Scoring module phục hồi ngày `open`, `closed` và `grading` sau restart; lỗi tạm thời được retry với backoff. Match replay được lưu trước khi chuyển trạng thái match sang hoàn tất để reset không xóa giữa lượt upload. Missing bot source được log; nếu ngày đóng, match sẽ xử theo nhánh vắng mặt sau khi lấy được lease.
 - Chưa chạy build/test hoặc apply migrations từ workspace. Trước khi dùng reset production: apply migrations 0008–0011; deploy frontend và scoring module đồng bộ; đảm bảo CORS/tunnel tới module hoạt động. Reset cần module online và sẽ báo từ chối nếu công việc còn đang hoạt động.
+
+## Cập nhật proxy và lịch sử nộp bài (2026-10-27)
+
+### Đã hoàn thành
+
+- Đã chuyển kết quả proxy về một schema thống nhất: `match_score`, `passed`,
+  `match_result` (`win`/`loss`/`draw`) và `games`. Vòng loại chỉ đấu với một
+  bot mẫu; không còn dùng tiêu chí 3 bot/điểm trọng số của scoring module cũ.
+- Đã cập nhật frontend và lịch sử nộp bài để hiển thị trực tiếp thắng/hòa/thua
+  từ `match_score`.
+- Đã thêm migration `0020_proxy_result_status.sql`. RPC
+  `complete_proxy_scoring_job` ghi kết quả proxy vào `scoring_jobs`, cập nhật
+  `entry_score` và chuyển thí sinh sang `active` khi thắng vòng loại.
+- Đã sửa lỗi frontend đánh dấu job proxy hoàn tất trước khi RPC Supabase hoàn
+  tất. Trước đây RPC lỗi bị che bởi cờ polling đã kết thúc, khiến giao diện
+  chấm xong nhưng lịch sử vẫn là `accepted`/`running`. Frontend hiện giữ job
+  đang hoàn tất, kiểm tra giá trị boolean RPC trả về và báo rõ nếu migration
+  chưa được áp dụng.
+
+### Việc cần triển khai bắt buộc
+
+1. Chạy `data/supabase/migrations/0020_proxy_result_status.sql` và sau đó
+   `data/supabase/migrations/0021_proxy_result_idempotency.sql` trên project
+   Supabase production sau các migration `0018` và `0019`.
+2. Deploy lại frontend sau thay đổi `App.tsx`, `SubmissionHistory.tsx` và
+   `api.ts`.
+3. Deploy lại Worker sau thay đổi schema kết quả trong `worker.js`.
+4. Nộp một bài mới và xác nhận trong bảng `scoring_jobs`:
+   `status = 'succeeded'`, `result.match_score` có giá trị và
+   `finished_at` khác null.
+5. Mở lại trang lịch sử hoặc bấm “Làm mới”; trạng thái phải là “Đã chấm xong”.
+
+### Chẩn đoán nếu lịch sử vẫn chờ
+
+- Nếu frontend báo lỗi RPC: đọc phần chi tiết sau dấu `:`. `proxy_scoring_job_not_owned`
+  nghĩa là `job_id` trả từ Worker không thuộc user hiện tại; `invalid_proxy_result`
+  nghĩa là kết quả proxy không có `match_score` hợp lệ. Các lỗi này không còn bị
+  biến thành thông báo chung.
+- Migration `0021` làm RPC idempotent: nếu frontend retry sau khi request trước
+  đã ghi thành công, RPC trả `true` thay vì `false`. Nếu frontend vẫn báo thiếu
+  migration, kiểm tra migration `0021` và quyền execute cho role `authenticated`.
+- Lỗi `403 proxy_scoring_job_not_owned` đã được truy nguyên thêm: frontend tạo
+  `scoring_jobs.id` và gửi `job_id` lên Worker, nhưng Worker trước đây không
+  chuyển `job_id` vào Durable Object ở nhánh enqueue trực tiếp (và tự sinh UUID
+  khác). Worker mới giữ nguyên `job_id` qua cả nhánh enqueue thường và
+  `enqueue-waiting`, nên RPC hoàn tất tra đúng bản ghi Supabase.
+- Nếu Worker trả `succeeded` nhưng `scoring_jobs` vẫn `running`, kiểm tra
+  request `POST /rest/v1/rpc/complete_proxy_scoring_job` trong DevTools và
+  response JSON/HTTP status.
+- Không sửa trực tiếp trạng thái bằng frontend hoặc service-role key. Kết quả
+  phải được ghi qua RPC để giữ kiểm tra chủ sở hữu job và RLS.
+
+### Kiểm thử workspace
+
+- `git diff --check`: đạt.
+- Chưa chạy được build/type-check frontend vì môi trường hiện tại không có
+  `node`, `npm` hoặc `npx`.
