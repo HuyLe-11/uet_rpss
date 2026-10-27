@@ -247,13 +247,34 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
     let finalizing = false;
     if (proxyJobMode) {
       if (activeMatchId !== null) {
+        let terminalJobAt: number | null = null;
         const readMatchResult = async () => {
           try {
-            const matches = await getMyTodayMatches();
+            const [matches, job] = await Promise.all([
+              getMyTodayMatches(),
+              pollProxyScore(activeJobId).catch(() => null),
+            ]);
             if (finished) return;
             setTodayMatches(matches);
+            if (job) {
+              setActiveJobStatus(job.status === 'waiting' || job.status === 'queued' ? 'accepted' : job.status === 'running' ? 'running' : job.status);
+              if (job.status === 'succeeded' || job.status === 'failed') {
+                terminalJobAt ??= Date.now();
+              }
+            }
             const match = matches.find((item) => item.match_id === activeMatchId);
-            if (!match) return;
+            if (!match) {
+              if (terminalJobAt !== null && Date.now() - terminalJobAt >= 30_000) {
+                finished = true;
+                setActiveJobId(null);
+                setActiveMatchId(null);
+                setActiveMatchAttempt(null);
+                setError(job?.status === 'failed'
+                  ? `Worker không chấm xong trận: ${job.error || 'lỗi không xác định'}`
+                  : 'Worker đã kết thúc job nhưng trận không còn trong dữ liệu ngày thi. Hãy làm mới trang hoặc báo ban tổ chức kèm mã trận.');
+              }
+              return;
+            }
             if (match.state === 'pending' && activeMatchAttempt !== null && match.attempts_completed > activeMatchAttempt) {
               finished = true;
               setActiveJobId(null);
@@ -264,7 +285,18 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
               await refresh();
               return;
             }
-            if (!['completed', 'forfeit'].includes(match.state)) return;
+            if (!['completed', 'forfeit'].includes(match.state)) {
+              if (terminalJobAt !== null && Date.now() - terminalJobAt >= 30_000) {
+                finished = true;
+                setActiveJobId(null);
+                setActiveMatchId(null);
+                setActiveMatchAttempt(null);
+                setError(job?.status === 'failed'
+                  ? `Worker không chấm xong trận: ${job.error || 'lỗi không xác định'}`
+                  : `Worker đã báo chấm xong nhưng trạng thái trận chưa cập nhật (đã chấm ${match.attempts_completed}/2 lượt). Hãy làm mới trang; nếu vẫn pending, báo ban tổ chức mã trận ${activeMatchId}.`);
+              }
+              return;
+            }
             const score = match.my_match_score ?? 0;
             finished = true;
             setActiveJobId(null);
