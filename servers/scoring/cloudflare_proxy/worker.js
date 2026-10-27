@@ -33,7 +33,10 @@ async function authenticate(request, env) {
   const response = await fetch(`${env.SUPABASE_URL.replace(/\/$/, "")}/auth/v1/user`, {
     headers: { apikey: env.SUPABASE_ANON_KEY, authorization: token },
   });
-  if (!response.ok) return null;
+  if (!response.ok) {
+    console.log(JSON.stringify({ event: "supabase_auth_rejected", status: response.status }));
+    return null;
+  }
   const user = await response.json();
   return user?.id ? { id: user.id, token } : null;
 }
@@ -68,6 +71,92 @@ async function supabaseServiceRpc(env, name, body) {
   const payload = await response.json().catch(() => null);
   if (!response.ok) throw new Error(`supabase_${name}_${response.status}:${payload?.message || payload?.hint || "request failed"}`);
   return payload;
+}
+
+async function supabaseServiceSelect(env, query) {
+  const key = env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!key) throw new Error("supabase_service_role_not_configured");
+  const response = await fetch(`${env.SUPABASE_URL.replace(/\/$/, "")}/rest/v1/${query}`, {
+    headers: { apikey: key, authorization: `Bearer ${key}` },
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(`supabase_select_${response.status}:${payload?.message || "request failed"}`);
+  }
+  return payload;
+}
+
+async function storeReplayObject(env, { matchId = null, jobId = null, games }) {
+  if ((!Number.isInteger(matchId) && !jobId) || (matchId !== null && jobId !== null)) {
+    throw new Error("invalid_replay_owner");
+  }
+  if (!Array.isArray(games) || games.length === 0) throw new Error("empty_replay");
+  const key = env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!key) throw new Error("supabase_service_role_not_configured");
+
+  const storagePath = matchId !== null ? `matches/${matchId}.json.gz` : `jobs/${jobId}.json.gz`;
+  const json = new TextEncoder().encode(JSON.stringify(games));
+  const compressed = await new Response(
+    new Blob([json]).stream().pipeThrough(new CompressionStream("gzip")),
+  ).arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", compressed);
+  const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const encodedPath = storagePath.split("/").map(encodeURIComponent).join("/");
+  const base = env.SUPABASE_URL.replace(/\/$/, "");
+
+  const upload = await fetch(`${base}/storage/v1/object/replays/${encodedPath}`, {
+    method: "POST",
+    headers: {
+      apikey: key,
+      authorization: `Bearer ${key}`,
+      "content-type": "application/gzip",
+      "x-upsert": "true",
+    },
+    body: compressed,
+  });
+  if (!upload.ok) {
+    throw new Error(`supabase_replay_upload_${upload.status}:${(await upload.text()).slice(0, 250)}`);
+  }
+
+  const metadata = {
+    match_id: matchId,
+    job_id: jobId,
+    storage_path: storagePath,
+    content_type: "application/gzip",
+    size_bytes: compressed.byteLength,
+    sha256,
+    state: "ready",
+  };
+  const saved = await fetch(`${base}/rest/v1/replay_objects?on_conflict=storage_path`, {
+    method: "POST",
+    headers: {
+      apikey: key,
+      authorization: `Bearer ${key}`,
+      "content-type": "application/json",
+      prefer: "resolution=merge-duplicates,return=minimal",
+    },
+    body: JSON.stringify([metadata]),
+  });
+  if (!saved.ok) {
+    throw new Error(`supabase_replay_metadata_${saved.status}:${(await saved.text()).slice(0, 250)}`);
+  }
+
+  if (matchId !== null) {
+    const marked = await fetch(`${base}/rest/v1/matches?id=eq.${matchId}`, {
+      method: "PATCH",
+      headers: {
+        apikey: key,
+        authorization: `Bearer ${key}`,
+        "content-type": "application/json",
+        prefer: "return=minimal",
+      },
+      body: JSON.stringify({ has_replay: true }),
+    });
+    if (!marked.ok) {
+      throw new Error(`supabase_match_replay_flag_${marked.status}:${(await marked.text()).slice(0, 250)}`);
+    }
+  }
+  return { storage_path: storagePath, size_bytes: compressed.byteLength, sha256 };
 }
 
 function jsonResponse(value, status = 200) {

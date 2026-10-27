@@ -171,8 +171,11 @@ def _claimed_job_record(value):
             break
         # PostgREST can wrap a composite result under the function name or
         # another single response key depending on its schema cache version.
-        nested_values = [item for item in value.values() if isinstance(item, (dict, list))]
-        value = nested_values[0] if len(nested_values) == 1 else None
+        if len(value) != 1:
+            return None
+        value = next(iter(value.values()))
+        if value is None:
+            return None
     if not isinstance(value, dict) or "id" not in value:
         return None
     if "id" not in value:
@@ -228,6 +231,31 @@ def _cleanup_reset_source_files(max_batches=None):
     except Exception:
         logger.exception("Could not drain reset bot-source cleanup queue")
         return {"deleted": deleted, "complete": False}
+
+
+def _cleanup_day_source_files(round_number, day_number):
+    """Remove bot source files after every match for a day is finalized."""
+    try:
+        rows = get_supabase().select("submissions", {
+            "rnd": f"eq.{round_number}", "day": f"eq.{day_number}",
+            "select": "scoring_job_id",
+        }) or []
+        for row in rows:
+            job_id = row.get("scoring_job_id")
+            if not job_id:
+                continue
+            path = _local_result_path(str(job_id))
+            try:
+                path.unlink(missing_ok=True)
+                try:
+                    path.parent.rmdir()
+                except OSError:
+                    pass
+            except OSError:
+                logger.exception("Could not remove completed day bot source %s", path)
+    except Exception:
+        # Finalization is already committed; a cleanup failure must not undo it.
+        logger.exception("Could not clean bot sources for r%s/d%s", round_number, day_number)
 
 
 def _save_source(job_id, source):
@@ -318,12 +346,16 @@ def _evaluate_result(match, duration):
 def _run_job(job_id, source_path, job):
     global _completed_jobs, _failed_jobs
     deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
+    retain_source_for_tournament = False
     try:
         logger.info("Starting scoring job %s (kind=%s)", job_id, job.get("kind"))
         _rpc("mark_scoring_job_running", {"p_job_id": job_id})
         if job.get("kind") == "submission":
             result = {"ok": True, "submitted": True, "job_id": job_id}
             _rpc("complete_scoring_job", {"p_job_id": job_id, "p_result": result})
+            # The tournament scheduler reads this file later, after both
+            # submissions exist. Keep it until finalize_tournament_day.
+            retain_source_for_tournament = True
             logger.info("Submission %s is ready for its scheduled match", job_id)
             if job.get("rnd") and job.get("day"):
                 _schedule_tournament_day(int(job["rnd"]), int(job["day"]))
@@ -401,10 +433,11 @@ def _run_job(job_id, source_path, job):
             logger.exception("Could not report module failure to Supabase for job %s", job_id)
         logger.exception("Scoring job %s failed", job_id)
     finally:
-        try:
-            source_path.unlink(missing_ok=True)
-        except OSError:
-            logger.exception("Could not remove source file for scoring job %s", job_id)
+        if not retain_source_for_tournament:
+            try:
+                source_path.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("Could not remove source file for scoring job %s", job_id)
         with _dedupe_lock:
             _inflight.discard(job_id)
         _capacity.release()
@@ -671,6 +704,7 @@ def _process_tournament_day(round_number, day_number):
     if day_state == "grading":
         result = _rpc("finalize_tournament_day", {"p_rnd": round_number, "p_day": day_number})
         logger.info("Tournament day r%s/d%s finalized: %s", round_number, day_number, result)
+        _cleanup_day_source_files(round_number, day_number)
         next_round = result.get("next_round") if isinstance(result, dict) else None
         if next_round:
             _schedule_tournament_day(int(next_round), 1)

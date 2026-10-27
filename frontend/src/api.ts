@@ -27,6 +27,24 @@ export function getScoringProxyUrl(): string {
   return DEFAULT_SCORING_PROXY_URL;
 }
 
+async function fetchScoringProxy(url: string, init: RequestInit): Promise<Response> {
+  const token = await getAccessToken();
+  if (!token) throw new Error('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
+  const headers = new Headers(init.headers);
+  headers.set('Authorization', `Bearer ${token}`);
+  let response = await fetch(url, { ...init, headers });
+  if (response.status !== 401) return response;
+
+  // A background tab can wake with an expired access token before the
+  // Supabase client's automatic refresh timer has run. Refresh once and retry.
+  const { data, error } = await supabase.auth.refreshSession();
+  const refreshedToken = data.session?.access_token;
+  if (error || !refreshedToken) return response;
+  headers.set('Authorization', `Bearer ${refreshedToken}`);
+  response = await fetch(url, { ...init, headers });
+  return response;
+}
+
 export type ProxyScoreJob = {
   job_id: string;
   status: 'waiting' | 'queued' | 'running' | 'succeeded' | 'failed';
@@ -45,11 +63,9 @@ export async function submitProxyScore(
 ): Promise<ProxyScoreJob> {
   const base = getScoringProxyUrl();
   if (!base) throw new Error('Chưa cấu hình Cloudflare scoring proxy.');
-  const token = await getAccessToken();
-  if (!token) throw new Error('Phiên đăng nhập đã hết hạn.');
-  const response = await fetch(`${base}/v1/score`, {
+  const response = await fetchScoringProxy(`${base}/v1/score`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contestant_code: source,
       match_id: options.matchId,
@@ -64,10 +80,8 @@ export async function submitProxyScore(
 
 export async function pollProxyScore(jobId: string): Promise<ProxyScoreJob> {
   const base = getScoringProxyUrl();
-  const token = await getAccessToken();
-  if (!base || !token) throw new Error('Phiên đăng nhập đã hết hạn hoặc chưa cấu hình scoring proxy.');
-  const response = await fetch(`${base}/v1/score/${encodeURIComponent(jobId)}`, {
-    headers: { Authorization: `Bearer ${token}` },
+  if (!base) throw new Error('Chưa cấu hình scoring proxy.');
+  const response = await fetchScoringProxy(`${base}/v1/score/${encodeURIComponent(jobId)}`, {
     cache: 'no-store',
   });
   const payload = await response.json().catch(() => null);
@@ -217,7 +231,7 @@ export async function createAndDispatchScoringJob(
   const sha256 = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
   const id = crypto.randomUUID();
 
-  const createJob = supabase.rpc('create_scoring_job', {
+  const { error: createError } = await supabase.rpc('create_scoring_job', {
     p_job_id: id,
     p_kind: kind,
     p_rnd: kind === 'submission' ? context?.round ?? null : null,
@@ -225,23 +239,15 @@ export async function createAndDispatchScoringJob(
     p_sha256: sha256,
     p_size_bytes: file.size,
   });
+  if (createError) throw new Error(scoringErrorMessage(createError.message));
+
+  // Persist the job before the module checks Supabase. Dispatching these in
+  // parallel can race PostgREST replica visibility and produce a false 409.
   const body = new FormData();
   body.append('file', file);
   if (kind === 'test') body.append('benchmark_ids', benchmarkIds.join(','));
   const dispatchController = new AbortController();
   const dispatchTimer = window.setTimeout(() => dispatchController.abort(), 10_000);
-  const dispatch = fetch(`${baseUrl}/v1/jobs/${id}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-    body,
-    signal: dispatchController.signal,
-  }).then(async response => {
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new ApiError(payload.detail || 'Máy chấm không nhận bài', response.status);
-    return payload;
-  }).finally(() => window.clearTimeout(dispatchTimer));
-
-  const [jobResult, dispatchResult] = await Promise.allSettled([createJob, dispatch]);
   const acceptedAfterRace = async () => {
     const { data: currentJob } = await supabase
       .from('scoring_jobs')
@@ -250,23 +256,27 @@ export async function createAndDispatchScoringJob(
       .maybeSingle();
     return Boolean(currentJob && ['accepted', 'running', 'succeeded'].includes(currentJob.status));
   };
-  if (jobResult.status === 'rejected' || jobResult.value.error) {
+  try {
+    const response = await fetch(`${baseUrl}/v1/jobs/${id}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body,
+      signal: dispatchController.signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new ApiError(payload.detail || 'Máy chấm không nhận bài', response.status);
+    return id;
+  } catch (dispatchError) {
     if (await acceptedAfterRace()) return id;
     await supabase.rpc('fail_scoring_dispatch', { p_job_id: id });
     if (await acceptedAfterRace()) return id;
-    const reason = jobResult.status === 'rejected' ? jobResult.reason?.message : jobResult.value.error?.message;
-    throw new Error(scoringErrorMessage(reason));
-  }
-  if (dispatchResult.status === 'rejected') {
-    if (await acceptedAfterRace()) return id;
-    await supabase.rpc('fail_scoring_dispatch', { p_job_id: id });
-    if (await acceptedAfterRace()) return id;
-    if (dispatchResult.reason?.name === 'AbortError') {
+    if (dispatchError instanceof Error && dispatchError.name === 'AbortError') {
       throw new Error('Máy chấm chưa xác nhận nhận bài trong 10 giây. Hãy kiểm tra kết nối rồi thử lại.');
     }
-    throw dispatchResult.reason;
+    throw dispatchError;
+  } finally {
+    window.clearTimeout(dispatchTimer);
   }
-  return id;
 }
 
 function scoringErrorMessage(message: string): string {
