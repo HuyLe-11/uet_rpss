@@ -36,7 +36,7 @@ function PieceIcon({ type }: { type: number }) {
   return <ScissorsIcon />;
 }
 
-export default function Replay({ data, onDay }: { data: Replays; onDay: (round: number, day: number) => void }) {
+export default function Replay({ data, onDay, initialMatchId }: { data: Replays; onDay: (round: number, day: number) => void; initialMatchId?: string | number | null }) {
   const [matchIndex, setMatchIndex] = useState(0);
   const [gameIndex, setGameIndex] = useState(0);
   const [step, setStep] = useState(0);
@@ -47,11 +47,14 @@ export default function Replay({ data, onDay }: { data: Replays; onDay: (round: 
   const match = data.matches[matchIndex];
 
   useEffect(() => {
-    setMatchIndex(0);
+    const requestedIndex = initialMatchId == null
+      ? -1
+      : data.matches.findIndex(item => String(item.id) === String(initialMatchId));
+    setMatchIndex(requestedIndex >= 0 ? requestedIndex : 0);
     setGameIndex(0);
     setStep(0);
     setPlaying(false);
-  }, [data]);
+  }, [data, initialMatchId]);
 
   useEffect(() => {
     let cancelled = false;

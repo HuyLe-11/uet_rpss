@@ -156,6 +156,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [status, setStatus] = useState<Status | null>(null);
   const [standings, setStandings] = useState<Standing[]>([]);
   const [replays, setReplays] = useState<Replays>(emptyReplays);
+  const [selectedReplayId, setSelectedReplayId] = useState<string | number | null>(null);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -835,17 +836,20 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
                     <span className="badge">{todayMatches.length} đối thủ</span>
                   </div>
                   <div className="match-history-list">
-                    {todayMatches.length ? todayMatches.map((match) => <div className="match-history-row" key={match.match_id}>
+                    {todayMatches.length ? todayMatches.map((match) => {
+                      const replay = replays.allMatches.find(item => item.kind === 'match' && String(item.id) === String(match.match_id));
+                      return <div className="match-history-row" key={match.match_id}>
                       <span>Lượt {match.rd}</span><strong>{match.opponent}</strong>
                       <small>Bạn: {submissionStateLabel(match.my_submission_state)} · Đối thủ: {submissionStateLabel(match.opponent_submission_state)}</small>
                       <small>Lượt BO2 đã chấm: {match.attempts_completed}/2</small>
                       {match.state === 'pending' && match.submission_deadline && (match.my_submission_state !== 'submitted' || match.opponent_submission_state !== 'submitted') && <small>{countdownLabel(match.submission_deadline, clockNow, match.my_submission_state === 'submitted' ? 'Đối thủ' : 'Bạn')}</small>}
                       {match.state === 'pending' && match.my_submission_state === 'submitted' && match.opponent_submission_state === 'submitted' && <small>Hai bên đã nộp · đang chờ chấm</small>}
                       <small>ID: {match.match_id}</small><b>{match.state}</b>
-                    </div>) : <p className="muted">Chưa có cặp đấu trong ngày hiện tại.</p>}
+                      {replay && <button type="button" className="secondary match-replay-button" onClick={() => { setSelectedReplayId(replay.id ?? null); navigate('/replay'); }}>Xem lại trận đấu <ArrowRight size={14}/></button>}
+                    </div>}) : <p className="muted">Chưa có cặp đấu trong ngày hiện tại.</p>}
                   </div>
                   {latestScoringResult && <div className="history-score-card"><span>Điểm gần nhất</span><strong>{latestScoringResult.match_score ?? latestScoringResult.qualification_score ?? '—'}</strong></div>}
-                  <button className="secondary full" onClick={() => navigate('/replay')}>
+                  <button className="secondary full" onClick={() => { setSelectedReplayId(null); navigate('/replay'); }}>
                     Xem lại trận đấu <ArrowRight size={16} />
                   </button>
                 </section>
@@ -910,6 +914,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
           {tab === 'replay' && (
             <Replay
               data={replays}
+              initialMatchId={selectedReplayId}
               onDay={(r, d) => {
                 void getReplayMetadata(r, d)
                   .then(setReplays)

@@ -126,6 +126,7 @@
 .match-history-row{display:grid;grid-template-columns:42px minmax(0,1fr) auto;gap:5px 10px;padding:10px;border:1px solid var(--ui-border);font-size:12px}
 .match-history-row small{grid-column:2;color:var(--ui-muted);font-size:10px}
 .match-history-row b{grid-column:3;grid-row:1 / span 2;color:var(--ui-muted);font-size:10px}
+.match-replay-button{grid-column:2 / 4;justify-self:start;display:inline-flex;align-items:center;gap:6px;margin-top:4px}
 .history-score-card{display:flex;justify-content:space-between;padding:12px 0;margin-bottom:14px;border-top:1px solid var(--ui-border);color:var(--ui-muted)}
 .history-score-card strong{color:var(--tone-blue);font-size:20px}
 .language-select{display:block;margin-top:4px;padding:4px 6px;border:1px solid var(--ui-border);background:var(--ui-surface);color:var(--ui-text);font-weight:700}
